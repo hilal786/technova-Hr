@@ -21,6 +21,7 @@
 ###############################################################################
 from datetime import datetime, date, timedelta
 from odoo import api, fields, models, _
+from odoo.exceptions import ValidationError
 
 
 class HrEmployeeDocument(models.Model):
@@ -84,3 +85,9 @@ class HrEmployeeDocument(models.Model):
                     'message': _("Your Document Is Already Expired.")
                 }
             }
+
+    @api.constrains('doc_attachment_ids')
+    def _check_single_attachment(self):
+        for rec in self:
+            if len(rec.doc_attachment_ids) > 1:
+                raise ValidationError(_("You can only attach one document file."))

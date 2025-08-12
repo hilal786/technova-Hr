@@ -52,7 +52,7 @@ class HrAnnouncement(models.Model):
                                  readonly=True, help="Login user Company")
     is_announcement = fields.Boolean(string='Is general Announcement?',
                                      help="Enable, if this is a "
-                                          "General Announcement")
+                                          "General Announcement", default=True)
     announcement_type = fields.Selection(
         [('employee', 'By Employee'), ('department', 'By Department'),
          ('job_position', 'By Job Position')], string="Announcement Type",
