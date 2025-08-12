@@ -162,7 +162,7 @@ class MobileApiHome(http.Controller):
 
         return {"status": 200, "message": "Expense created", "expense_id": expense.id}
 
-    @http.route('/mobile/expenses/list', type='json', auth='user', methods=['GET'], csrf=False)
+    @http.route('/mobile/expenses/list', type='json', auth='user', methods=['POST'], csrf=False)
     def list_expenses(self, **kwargs):
         user = request.env.user
         employee = request.env['hr.employee'].sudo().search([('user_id', '=', user.id)], limit=1)
@@ -203,7 +203,7 @@ class MobileApiHome(http.Controller):
             "expenses": result
         }
 
-    @http.route('/mobile/leaves/list', type='json', auth='user', methods=['GET'], csrf=False)
+    @http.route('/mobile/leaves/list', type='json', auth='user', methods=['POST'], csrf=False)
     def list_leaves(self, **kwargs):
         data = request.get_json_data()
         user = request.env.user
