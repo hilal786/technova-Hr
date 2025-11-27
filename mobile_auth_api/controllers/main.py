@@ -68,14 +68,14 @@ class MobileApiHome(http.Controller):
                 'username': request.session.login,
                 'auth_info': "Already Logged in",
 
-                'name': user.name,
-                'street': user.partner_id.street,
-                'city': user.partner_id.city,
-                'mobile': user.partner_id.mobile,
-                'zip': user.partner_id.zip,
-                'country_id': user.partner_id.country_id.with_user(request.session.uid).code,
-                'state_id': user.partner_id.state_id.with_user(request.session.uid).code,
-                'profile_image_url': self.get_image_url('res.users', user.id, 'image_1920'),
+                'name': user.name or "",
+                'street': user.partner_id.street or "",
+                'city': user.partner_id.city or "",
+                'mobile': user.partner_id.mobile or "",
+                'zip': user.partner_id.zip or "",
+                'country_id': user.partner_id.country_id.with_user(request.session.uid).code or "",
+                'state_id': user.partner_id.state_id.with_user(request.session.uid).code or "",
+                'profile_image_url': self.get_image_url('res.users', user.id, 'image_1920') or "",
             }
 
         try:
@@ -97,15 +97,15 @@ class MobileApiHome(http.Controller):
                     'username': request.session.login,
                     'auth_info': auth_info,
 
-                    'name': request.env.user.name,
-                    'street': request.env.user.partner_id.street,
-                    'city': request.env.user.partner_id.city,
-                    'mobile': request.env.user.partner_id.mobile,
-                    'zip': request.env.user.partner_id.zip,
-                    'country_id': request.env.user.partner_id.country_id.code,
-                    'state_id': request.env.user.partner_id.state_id.code,
-                    'profile_image_url': self.get_image_url('res.users', request.env.user.id, 'image_1920'),
-                    'image_1920': request.env.user.image_1920,
+                    'name': request.env.user.name or "" ,
+                    'street': request.env.user.partner_id.street or "",
+                    'city': request.env.user.partner_id.city or "",
+                    'mobile': request.env.user.partner_id.mobile or "",
+                    'zip': request.env.user.partner_id.zip or "",
+                    'country_id': request.env.user.partner_id.country_id.code or "",
+                    'state_id': request.env.user.partner_id.state_id.code or "",
+                    'profile_image_url': self.get_image_url('res.users', request.env.user.id, 'image_1920') or "",
+                    'image_1920': request.env.user.image_1920 or "" ,
                 }
             except odoo.exceptions.AccessDenied as e:
                 if e.args == odoo.exceptions.AccessDenied().args:
@@ -250,6 +250,8 @@ class MobileApiHome(http.Controller):
                 "period": f"{leave.request_date_from} to {leave.request_date_to}",
                 "reason": leave.name,
                 "status": leave.state,
+                'profile_image_url': self.get_image_url('hr.employee', leave.employee_id.id, 'image_1920') or "",
+                'image_1920': leave.employee_id.image_1920 or "" ,
             })
 
         return {
@@ -263,8 +265,8 @@ class MobileApiHome(http.Controller):
             "leaves": results
         }
 
-    @http.route('/mobile/leaves/types', type='json', auth='user', methods=['GET'], csrf=False)
-    def get_available_leave_types(self, **kwargs):
+    @http.route('/mobile/leaves/types', type='http', auth='user', methods=['GET'], csrf=False)
+    def get_available_leave_types(self):
         user = request.env.user
 
         # Find employee linked to logged-in user
@@ -288,10 +290,11 @@ class MobileApiHome(http.Controller):
 
         leave_types = request.env['hr.leave.type'].sudo().browse(all_type_ids).read(['id', 'name'])
 
-        return {
+        data = {
             "status": 200,
             "leave_types": leave_types
         }
+        return Response(json.dumps(data), content_type='application/json')
 
     @http.route('/mobile/leaves/create', type='json', auth='user', methods=['POST'], csrf=False)
     def create_leave(self, **kwargs):
@@ -419,7 +422,9 @@ class MobileApiHome(http.Controller):
                 "today_hours": round(timesheet_hours, 2),
                 "weekly_bar_chart": chart_data,
             },
-            "attendance_summary": attendance_summary
+            "attendance_summary": attendance_summary,
+            "profile_image_url": self.get_image_url('hr.employee', employee.id, 'image_1920') or "",
+            'image_1920': employee.image_1920 or "" ,
         }
 
     @http.route('/mobile/attendance/logs', type='json', auth='user', csrf=False)
