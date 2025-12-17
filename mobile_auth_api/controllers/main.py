@@ -509,7 +509,7 @@ class MobileApiHome(http.Controller):
 
         # --- 2. Working Hours Today ---
         today_timesheets = request.env['account.analytic.line'].sudo().search([
-            ('employee_id', '=', employee.id),
+            ('user_id', '=', user.id),
             ('date', '=', today)
         ])
         today_hours = sum(today_timesheets.mapped('unit_amount'))
@@ -520,7 +520,7 @@ class MobileApiHome(http.Controller):
         for i in range(7):
             day = start_week + timedelta(days=i)
             timesheets = request.env['account.analytic.line'].sudo().search([
-                ('employee_id', '=', employee.id),
+                ('user_id', '=', user.id),
                 ('date', '=', day)
             ])
             total = sum(timesheets.mapped('unit_amount'))
@@ -544,17 +544,32 @@ class MobileApiHome(http.Controller):
         user = request.env.user
         employee = request.env['hr.employee'].sudo().search([('user_id', '=', user.id)], limit=1)
         if not employee:
-            return {"status": 400, "error": "No employee found"}
+            return {"success": False, "message": "No employee found"}
 
         page = int(kwargs.get('page', 1))
         limit = int(kwargs.get('limit', 10))
         offset = (page - 1) * limit
         search = kwargs.get('search', '')
         sort = kwargs.get('sort', 'date_from desc')
+        year = kwargs.get('year')
+
 
         domain = [('employee_id', '=', employee.id)]
         if search:
             domain += ['|', ('name', 'ilike', search), ('number', 'ilike', search)]
+
+        # Year filter (MAIN REQUIREMENT)
+        if year:
+            try:
+                year = int(year)
+                date_from = f'{year}-01-01'
+                date_to = f'{year}-12-31'
+                domain += [
+                    ('date_from', '>=', date_from),
+                    ('date_to', '<=', date_to)
+                ]
+            except ValueError:
+                return {"success": False, "message": "Invalid year format"}
 
         Payslip = request.env['hr.payslip'].sudo()
         total = Payslip.search_count(domain)
@@ -801,100 +816,136 @@ class MobileApiHome(http.Controller):
 
     @http.route('/mobile/attendance/check', type='json', auth='user', csrf=False)
     def mobile_attendance_check(self, **kwargs):
-        """
-        action: check_in / check_out / break_in / break_out
-        latitude, longitude: float values
-        """
-        data = request.get_json_data()
+
+        data = request.get_json_data() or {}
         action = data.get('action')
         lat = data.get('latitude')
         lon = data.get('longitude')
 
-        user = request.env.user
-        employee = request.env['hr.employee'].sudo().search([('user_id', '=', user.id)], limit=1)
-        if not employee:
-            return {"status": 400, "error": "Employee not found for user."}
+        if lat is None or lon is None:
+            return {
+                "success": False,
+                "message": "Latitude and longitude are required"
+            }
 
-        attendance_model = request.env['hr.attendance'].sudo()
-        last_attendance = attendance_model.search(
-            [('employee_id', '=', employee.id)],
-            order="check_in desc",
-            limit=1
+        user = request.env.user
+        employee = request.env['hr.employee'].sudo().search(
+            [('user_id', '=', user.id)], limit=1
         )
+        if not employee:
+            return {
+                "success": False,
+                "message": "Employee not linked with user"
+            }
+
+        Attendance = request.env['hr.attendance'].sudo()
+
+        open_attendance = Attendance.search([
+            ('employee_id', '=', employee.id),
+            ('check_out', '=', False)
+        ], order='check_in desc', limit=1)
 
         now = fields.Datetime.now()
 
-        # --- Check In ---
         if action == 'check_in':
-            if last_attendance and not last_attendance.check_out and not last_attendance.is_break:
-                return {"status": 400, "error": "Already checked in. Please check out first."}
-            rec = attendance_model.create({
+            if open_attendance:
+                return {
+                    "success": False,
+                    "message": "Already checked in"
+                }
+
+            rec = Attendance.create({
                 'employee_id': employee.id,
                 'check_in': now,
                 'in_latitude': lat,
                 'in_longitude': lon,
                 'is_break': False
             })
-            return {"status": 200, "message": "Checked in successfully", "attendance_id": rec.id}
 
-        # --- Check Out ---
-        elif action == 'check_out':
-            if not last_attendance or last_attendance.check_out or last_attendance.is_break:
-                return {"status": 400, "error": "No open check-in found to check out from."}
-            last_attendance.write({
-                'check_out': now,
-                'out_latitude': lat,
-                'out_longitude': lon
-            })
-            return {"status": 200, "message": "Checked out successfully", "attendance_id": last_attendance.id}
+            return {
+                "success": True,
+                "message": "Checked in successfully",
+                "attendance_id": rec.id
+            }
 
-        # --- Break In ---
-        elif action == 'break_in':
-            if not last_attendance or last_attendance.check_out:
-                return {"status": 400, "error": "You must be checked in before starting a break."}
-            if last_attendance.is_break:
-                return {"status": 400, "error": "Already on a break."}
+        if action == 'check_out':
+            if not open_attendance or open_attendance.is_break:
+                return {
+                    "success": False,
+                    "message": "No active work session found"
+                }
 
-            # End main work period
-            last_attendance.write({
+            open_attendance.write({
                 'check_out': now,
                 'out_latitude': lat,
                 'out_longitude': lon
             })
 
-            # Start break record
-            break_rec = attendance_model.create({
+            return {
+                "success": True,
+                "message": "Checked out successfully",
+                "attendance_id": open_attendance.id
+            }
+
+        if action == 'break_in':
+            if not open_attendance or open_attendance.is_break:
+                return {
+                    "success": False,
+                    "message": "Cannot start break"
+                }
+
+            open_attendance.write({
+                'check_out': now,
+                'out_latitude': lat,
+                'out_longitude': lon
+            })
+
+            break_rec = Attendance.create({
                 'employee_id': employee.id,
                 'check_in': now,
                 'in_latitude': lat,
                 'in_longitude': lon,
                 'is_break': True
             })
-            return {"status": 200, "message": "Break started successfully", "attendance_id": break_rec.id}
 
-        # --- Break Out ---
-        elif action == 'break_out':
-            if not last_attendance or last_attendance.check_out or not last_attendance.is_break:
-                return {"status": 400, "error": "No open break found to end."}
+            return {
+                "success": True,
+                "message": "Break started",
+                "attendance_id": break_rec.id
+            }
 
-            # End break
-            last_attendance.write({
+        if action == 'break_out':
+            if not open_attendance or not open_attendance.is_break:
+                return {
+                    "success": False,
+                    "message": "No active break found"
+                }
+
+            open_attendance.write({
                 'check_out': now,
                 'out_latitude': lat,
                 'out_longitude': lon
             })
 
-            # Resume work
-            work_rec = attendance_model.create({
+            work_rec = Attendance.create({
                 'employee_id': employee.id,
                 'check_in': now,
                 'in_latitude': lat,
                 'in_longitude': lon,
                 'is_break': False
             })
-            return {"status": 200, "message": "Break ended, work resumed", "attendance_id": work_rec.id}
 
-        return {"status": 400, "error": "Invalid action."}
+            return {
+                "success": True,
+                "message": "Break ended, work resumed",
+                "attendance_id": work_rec.id
+            }
+
+        return {
+            "success": False,
+            "message": "Invalid action"
+        }
+
 
     @http.route('/mobile/logout', type='json', auth='user', methods=['POST'], csrf=False)
     def mobile_logout(self, **kwargs):
@@ -945,19 +996,15 @@ class MobileApiHome(http.Controller):
         if not document.exists():
             return {"status": 404, "error": "Document not found"}
 
-        # Security check:
         if not user.has_group('hr.group_hr_user'):
-            # Portal/regular users can only access their own documents
             if not employee or document.employee_id.id != employee.id:
                 return {"status": 403, "error": "You don't have permission to access this document"}
 
-        # If specific attachment is requested
         if attachment_id:
             attachment = document.doc_attachment_ids.filtered(lambda a: a.id == int(attachment_id))
             if not attachment:
                 return {"status": 404, "error": "Attachment not found for this document"}
         else:
-            # Default: first attachment
             attachment = document.doc_attachment_ids[:1]
             print("...")
 
@@ -972,3 +1019,198 @@ class MobileApiHome(http.Controller):
             "content_type": attachment.mimetype or "application/octet-stream",
             "base64_file": file_base64,
         }
+    
+    @http.route('/mobile/tasks', type='json', auth='user', methods=['POST'], csrf=False)
+    def mobile_task_list(self, **kwargs):
+
+        user = request.env.user
+        Task = request.env['project.task'].sudo()
+
+        domain = [
+            ('user_ids', 'in', user.id)
+        ]
+
+        tasks = Task.search(domain, order='id desc')
+
+        result = []
+        for task in tasks:
+            result.append({
+                "id": task.id,
+                "name": task.name,
+                "project": task.project_id.name if task.project_id else "",
+                "stage_id": task.stage_id.id if task.stage_id else None,
+                "status": task.stage_id.name if task.stage_id else "",
+                "deadline": task.date_deadline,
+                "priority": task.priority,
+            })
+
+        return {
+            "status": 200,
+            "count": len(result),
+            "tasks": result
+        }
+
+    @http.route('/mobile/tasks/change_status', type='json', auth='user', csrf=False)
+    def mobile_task_change_status(self, **kwargs):
+
+        data = request.get_json_data() or {}
+        task_id = data.get('task_id')
+        stage_id = data.get('stage_id')
+
+        if not task_id or not stage_id:
+            return {
+                "status": 400,
+                "message": "task_id and stage_id are required"
+            }
+
+        user = request.env.user
+        Task = request.env['project.task'].sudo()
+        Stage = request.env['project.task.type'].sudo()
+
+        task = Task.browse(int(task_id))
+        if not task.exists():
+            return {
+                "status": 404,
+                "message": "Task not found"
+            }
+
+        if user not in task.user_ids:
+            return {
+                "status": 403,
+                "message": "You are not assigned to this task"
+            }
+
+        stage = Stage.browse(int(stage_id))
+        if not stage.exists():
+            return {
+                "status": 404,
+                "message": "Stage not found"
+            }
+
+        task.write({'stage_id': stage.id})
+
+        return {
+            "status": 200,
+            "message": "Task status updated successfully",
+            "task": {
+                "id": task.id,
+                "name": task.name,
+                "stage_id": task.stage_id.id,
+                "stage_name": task.stage_id.name
+            }
+        }
+    
+
+    @http.route('/mobile/calendar', type='json', auth='user', csrf=False)
+    def mobile_calendar(self, **kwargs):
+        data = request.get_json_data() or {}
+
+        start_date = data.get('start_date')
+        end_date = data.get('end_date')
+
+        if not start_date or not end_date:
+            return {
+                "status": 400,
+                "message": "start_date and end_date are required"
+            }
+
+        user = request.env.user
+        employee = request.env['hr.employee'].sudo().search(
+            [('user_id', '=', user.id)], limit=1
+        )
+
+        if not employee:
+            return {
+                "status": 400,
+                "message": "Employee not linked with user"
+            }
+
+        calendar_data = []
+
+        tasks = request.env['project.task'].sudo().search([
+            ('date_deadline', '>=', start_date),
+            ('date_deadline', '<=', end_date),
+            ('user_ids', 'in', user.id)
+        ])
+
+        for task in tasks:
+            calendar_data.append({
+                "type": "task",
+                "id": task.id,
+                "title": task.name,
+                "start": task.date_deadline,
+                "end": task.date_deadline,
+                "color": "#4CAF50",
+                "status": task.stage_id.name if task.stage_id else ""
+            })
+
+        leaves = request.env['hr.leave'].sudo().search([
+            ('employee_id', '=', employee.id),
+            ('request_date_from', '<=', end_date),
+            ('request_date_to', '>=', start_date),
+            ('state', 'in', ['confirm', 'validate'])
+        ])
+
+        for leave in leaves:
+            calendar_data.append({
+                "type": "leave",
+                "id": leave.id,
+                "title": leave.holiday_status_id.name,
+                "start": leave.request_date_from,
+                "end": leave.request_date_to,
+                "color": "#FF9800",
+                "status": leave.state
+            })
+
+        events = request.env['event.event'].sudo().search([
+            ('date_begin', '>=', start_date),
+            ('date_begin', '<=', end_date)
+        ])
+
+        for event in events:
+            calendar_data.append({
+                "type": "event",
+                "id": event.id,
+                "title": event.name,
+                "start": event.date_begin,
+                "end": event.date_end,
+                "color": "#2196F3",
+                "location": event.address_id.name if event.address_id else ""
+            })
+
+        return {
+            "status": 200,
+            "count": len(calendar_data),
+            "calendar": calendar_data
+        }
+
+    @http.route('/mobile/profile', type='json', auth='user', csrf=False)
+    def mobile_profile(self, **kwargs):
+        user = request.env.user
+
+        if not user:
+            return {
+                "status": 401,
+                "message": "Session expired"
+            }
+
+        partner = user.partner_id
+
+        return {
+            "status": 200,
+            "uid": user.id,
+            "db": request.session.db,
+            "username": user.login,
+            "auth_info": "Session Active",
+
+            "name": user.name or "",
+            "street": partner.street or "",
+            "city": partner.city or "",
+            "mobile": partner.mobile or "",
+            "zip": partner.zip or "",
+            "country_id": partner.country_id.code if partner.country_id else "",
+            "state_id": partner.state_id.code if partner.state_id else "",
+            "profile_image_url": self.get_image_url('res.users', user.id, 'image_1920') or "",
+            "image_1920": user.image_1920 or "",
+        }
+
