@@ -56,7 +56,6 @@ class MobileApiHome(http.Controller):
                 "status": 403,
                 "error": f"Login blocked: Host mismatch. Expected base {login_url}, got {request_host}"
             }
-        # Always clear existing session before login attempt
         request.session.logout()
 
         if request.httprequest.method == 'POST' and request.session.uid:
@@ -832,17 +831,39 @@ class MobileApiHome(http.Controller):
         employee = request.env['hr.employee'].sudo().search(
             [('user_id', '=', user.id)], limit=1
         )
+
         if not employee:
             return {
                 "success": False,
                 "message": "Employee not linked with user"
             }
 
+        office_lat = employee.office_latitude
+        office_lon = employee.office_longitude
+        allowed_radius = employee.allowed_radius_m or 100
+
+        if not office_lat or not office_lon:
+            return {
+                "success": False,
+                "message": "Office location not configured"
+            }
+
+        if action in ('check_in', 'break_in'):
+            distance = self._distance_in_meters(
+                lat, lon, office_lat, office_lon
+            )
+            if distance > allowed_radius:
+                return {
+                    "success": False,
+                    "message": f"You are {int(distance)} meters away. Allowed radius is {allowed_radius} meters."
+                }
+
         Attendance = request.env['hr.attendance'].sudo()
 
         open_attendance = Attendance.search([
             ('employee_id', '=', employee.id),
-            ('check_out', '=', False)
+            ('check_out', '=', False),
+            ('is_break', '=', False)
         ], order='check_in desc', limit=1)
 
         now = fields.Datetime.now()
@@ -869,7 +890,7 @@ class MobileApiHome(http.Controller):
             }
 
         if action == 'check_out':
-            if not open_attendance or open_attendance.is_break:
+            if not open_attendance:
                 return {
                     "success": False,
                     "message": "No active work session found"
@@ -888,7 +909,7 @@ class MobileApiHome(http.Controller):
             }
 
         if action == 'break_in':
-            if not open_attendance or open_attendance.is_break:
+            if not open_attendance:
                 return {
                     "success": False,
                     "message": "Cannot start break"
@@ -915,13 +936,19 @@ class MobileApiHome(http.Controller):
             }
 
         if action == 'break_out':
-            if not open_attendance or not open_attendance.is_break:
+            break_attendance = Attendance.search([
+                ('employee_id', '=', employee.id),
+                ('check_out', '=', False),
+                ('is_break', '=', True)
+            ], order='check_in desc', limit=1)
+
+            if not break_attendance:
                 return {
                     "success": False,
                     "message": "No active break found"
                 }
 
-            open_attendance.write({
+            break_attendance.write({
                 'check_out': now,
                 'out_latitude': lat,
                 'out_longitude': lon
@@ -945,6 +972,21 @@ class MobileApiHome(http.Controller):
             "success": False,
             "message": "Invalid action"
         }
+
+    def _distance_in_meters(self, lat1, lon1, lat2, lon2):
+        R = 6371000
+        phi1 = math.radians(lat1)
+        phi2 = math.radians(lat2)
+        dphi = math.radians(lat2 - lat1)
+        dlambda = math.radians(lon2 - lon1)
+
+        a = (
+            math.sin(dphi / 2) ** 2
+            + math.cos(phi1) * math.cos(phi2)
+            * math.sin(dlambda / 2) ** 2
+        )
+        return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
 
 
     @http.route('/mobile/logout', type='json', auth='user', methods=['POST'], csrf=False)

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<odoo>
+    <record id="view_employee_coordinates" model="ir.ui.view">
+        <field name="name">hr.employee</field>
+        <field name="model">hr.employee</field>
+        <field name="inherit_id" ref="hr.view_employee_form" />
+        <field name="priority">110</field>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='attendance_manager_id']" position="after">
+                <field name="office_latitude"/>
+                <field name="office_longitude"/>
+                <field name="allowed_radius_m"/>
+            </xpath>
+            </field>
+    </record>
+</odoo>
+        

@@ -8,7 +8,9 @@
     'license': 'LGPL-3',
     'depends': ['base', 'web', 'hr_expense', 'hr_holidays', 'hr_attendance', 'hr_payroll', 'employee_documents_expiry',
                 'website_event', 'hr_reward_warning','project','event'],
-    'data': [],
+    'data': [
+        'views/hr_employee.xml',
+    ],
     'installable': True,
     'application': False,
 }
