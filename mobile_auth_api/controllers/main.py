@@ -387,18 +387,19 @@ class MobileApiHome(http.Controller):
 
         # Today's timesheet
         timesheets = request.env['account.analytic.line'].sudo().search_read([
-            ('employee_id', '=', employee.id),
+            ('user_id', '=', employee.user_id.id),
             ('date', '=', today)
         ], ['unit_amount'])
 
         timesheet_hours = sum(t['unit_amount'] for t in timesheets)
+
 
         # Weekly bar chart (timesheet hours for past 7 days)
         chart_data = []
         for i in range(7):
             day = today - timedelta(days=i)
             daily_timesheets = request.env['account.analytic.line'].sudo().search_read([
-                ('employee_id', '=', employee.id),
+                ('user_id', '=', employee.user_id.id),
                 ('date', '=', day)
             ], ['unit_amount'])
 
@@ -407,6 +408,7 @@ class MobileApiHome(http.Controller):
                 "date": str(day),
                 "hours": round(total_hours, 2)
             })
+
 
         # Sort the chart data by date ascending
         chart_data = sorted(chart_data, key=lambda x: x['date'])
@@ -684,7 +686,7 @@ class MobileApiHome(http.Controller):
             "documents": result
         }
 
-    @http.route('/mobile/payslip/download_base64', type='json', auth='user', csrf=False)
+    @http.route('/mobile/employee/document/download_base64', type='json', auth='user', csrf=False)
     def download_payslip_pdf_base64(self, **kwargs):
         data = request.get_json_data()
         payslip_id = data.get('payslip_id')
@@ -821,6 +823,12 @@ class MobileApiHome(http.Controller):
         lat = data.get('latitude')
         lon = data.get('longitude')
 
+        if action not in ('check_in', 'check_out', 'break_in', 'break_out'):
+            return {
+                "success": False,
+                "message": "Invalid action"
+            }
+
         if lat is None or lon is None:
             return {
                 "success": False,
@@ -848,28 +856,33 @@ class MobileApiHome(http.Controller):
                 "message": "Office location not configured"
             }
 
-        if action in ('check_in', 'break_in'):
-            distance = self._distance_in_meters(
-                lat, lon, office_lat, office_lon
-            )
-            if distance > allowed_radius:
-                return {
-                    "success": False,
-                    "message": f"You are {int(distance)} meters away. Allowed radius is {allowed_radius} meters."
-                }
+        # GPS check for ALL actions
+        distance = self._distance_in_meters(lat, lon, office_lat, office_lon)
+        if distance > allowed_radius:
+            return {
+                "success": False,
+                "message": f"You are {int(distance)} meters away. Allowed radius is {allowed_radius} meters."
+            }
 
         Attendance = request.env['hr.attendance'].sudo()
 
-        open_attendance = Attendance.search([
+        open_work = Attendance.search([
             ('employee_id', '=', employee.id),
             ('check_out', '=', False),
             ('is_break', '=', False)
         ], order='check_in desc', limit=1)
 
+        open_break = Attendance.search([
+            ('employee_id', '=', employee.id),
+            ('check_out', '=', False),
+            ('is_break', '=', True)
+        ], order='check_in desc', limit=1)
+
         now = fields.Datetime.now()
 
+        # ---------------- CHECK IN ----------------
         if action == 'check_in':
-            if open_attendance:
+            if open_work or open_break:
                 return {
                     "success": False,
                     "message": "Already checked in"
@@ -889,14 +902,21 @@ class MobileApiHome(http.Controller):
                 "attendance_id": rec.id
             }
 
+        # ---------------- CHECK OUT ----------------
         if action == 'check_out':
-            if not open_attendance:
+            if open_break:
+                return {
+                    "success": False,
+                    "message": "End break before checking out"
+                }
+
+            if not open_work:
                 return {
                     "success": False,
                     "message": "No active work session found"
                 }
 
-            open_attendance.write({
+            open_work.write({
                 'check_out': now,
                 'out_latitude': lat,
                 'out_longitude': lon
@@ -905,17 +925,25 @@ class MobileApiHome(http.Controller):
             return {
                 "success": True,
                 "message": "Checked out successfully",
-                "attendance_id": open_attendance.id
+                "attendance_id": open_work.id
             }
 
+        # ---------------- BREAK IN ----------------
         if action == 'break_in':
-            if not open_attendance:
+            if not open_work:
                 return {
                     "success": False,
-                    "message": "Cannot start break"
+                    "message": "Check in before starting break"
                 }
 
-            open_attendance.write({
+            if open_break:
+                return {
+                    "success": False,
+                    "message": "Already on break"
+                }
+
+            # close work
+            open_work.write({
                 'check_out': now,
                 'out_latitude': lat,
                 'out_longitude': lon
@@ -935,20 +963,16 @@ class MobileApiHome(http.Controller):
                 "attendance_id": break_rec.id
             }
 
+        # ---------------- BREAK OUT ----------------
         if action == 'break_out':
-            break_attendance = Attendance.search([
-                ('employee_id', '=', employee.id),
-                ('check_out', '=', False),
-                ('is_break', '=', True)
-            ], order='check_in desc', limit=1)
-
-            if not break_attendance:
+            if not open_break:
                 return {
                     "success": False,
                     "message": "No active break found"
                 }
 
-            break_attendance.write({
+            # close break
+            open_break.write({
                 'check_out': now,
                 'out_latitude': lat,
                 'out_longitude': lon
@@ -968,10 +992,6 @@ class MobileApiHome(http.Controller):
                 "attendance_id": work_rec.id
             }
 
-        return {
-            "success": False,
-            "message": "Invalid action"
-        }
 
     def _distance_in_meters(self, lat1, lon1, lat2, lon2):
         R = 6371000
