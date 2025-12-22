@@ -7,9 +7,12 @@
         <field name="priority">110</field>
         <field name="arch" type="xml">
             <xpath expr="//field[@name='attendance_manager_id']" position="after">
-                <field name="office_latitude"/>
-                <field name="office_longitude"/>
-                <field name="allowed_radius_m"/>
+                <group string="Office Attendance Location"
+                   groups="hr.group_hr_user,hr.group_hr_manager">
+                    <field name="office_latitude"/>
+                    <field name="office_longitude"/>
+                    <field name="allowed_radius_m"/>
+                </group>
             </xpath>
             </field>
     </record>

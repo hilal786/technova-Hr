@@ -34,28 +34,20 @@ class MobileApiHome(http.Controller):
             [('country_id.code', '=', country_code)], ['name', 'code'])
         return Response(json.dumps({"status": 200, "states": states}, ensure_ascii=False),
                         content_type="application/json", status=200)
-
+    
     @http.route('/mobile/login', type='json', auth='none', readonly=False)
     def mobile_login(self, **kw):
         ensure_db()
         values = {}
 
-        data = request.get_json_data()
-        login_url = data.get("web_url")
+        data = request.get_json_data() or {}
         login = data.get("login")
         password = data.get("password")
 
-        if not login_url or not login or not password:
-            return {"status": 400, "error": "Missing login, password, or web_url"}
+        if not login or not password:
+            return {"status": 400, "error": "Missing login or password"}
 
-        request_host = request.httprequest.host_url.rstrip('/')
-        print('...request_host.', request_host)
-
-        if login_url and not request_host.startswith(login_url):
-            return {
-                "status": 403,
-                "error": f"Login blocked: Host mismatch. Expected base {login_url}, got {request_host}"
-            }
+        # logout existing session (keeping your logic as-is)
         request.session.logout()
 
         if request.httprequest.method == 'POST' and request.session.uid:
@@ -84,11 +76,15 @@ class MobileApiHome(http.Controller):
 
         if request.httprequest.method == 'POST':
             try:
-                credential = {key: value for key, value in data.items() if
-                              key in ['login', 'password', 'type'] and value}
+                credential = {
+                    key: value for key, value in data.items()
+                    if key in ['login', 'password', 'type'] and value
+                }
                 credential.setdefault('type', 'password')
+
                 auth_info = request.session.authenticate(request.db, credential)
                 request.params['login_success'] = True
+
                 return {
                     "status": 200,
                     'uid': request.session.uid,
@@ -96,16 +92,19 @@ class MobileApiHome(http.Controller):
                     'username': request.session.login,
                     'auth_info': auth_info,
 
-                    'name': request.env.user.name or "" ,
+                    'name': request.env.user.name or "",
                     'street': request.env.user.partner_id.street or "",
                     'city': request.env.user.partner_id.city or "",
                     'mobile': request.env.user.partner_id.mobile or "",
                     'zip': request.env.user.partner_id.zip or "",
                     'country_id': request.env.user.partner_id.country_id.code or "",
                     'state_id': request.env.user.partner_id.state_id.code or "",
-                    'profile_image_url': self.get_image_url('res.users', request.env.user.id, 'image_1920') or "",
-                    'image_1920': request.env.user.image_1920 or "" ,
+                    'profile_image_url': self.get_image_url(
+                        'res.users', request.env.user.id, 'image_1920'
+                    ) or "",
+                    'image_1920': request.env.user.image_1920 or "",
                 }
+
             except odoo.exceptions.AccessDenied as e:
                 if e.args == odoo.exceptions.AccessDenied().args:
                     return {
@@ -122,6 +121,7 @@ class MobileApiHome(http.Controller):
                 "status": 400,
                 'error': 'Invalid request',
             }
+
 
     def _get_default_expense_product(self):
         product = request.env['product.product'].sudo().search(
