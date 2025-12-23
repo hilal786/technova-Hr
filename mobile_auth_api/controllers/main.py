@@ -270,21 +270,17 @@ class MobileApiHome(http.Controller):
     def get_available_leave_types(self):
         user = request.env.user
 
-        # Find employee linked to logged-in user
         employee = request.env['hr.employee'].sudo().search([('user_id', '=', user.id)], limit=1)
         if not employee:
             return {"status": 400, "error": "No employee linked to this user"}
 
-        # Leave types allocated to this employee (validated allocations only)
         allocated_types = request.env['hr.leave.allocation'].sudo().search([
             ('employee_id', '=', employee.id),
             ('state', '=', 'validate')
         ]).mapped('holiday_status_id.id')
 
-        # Leave types that do NOT require allocation
         all_types = request.env['hr.leave.type'].sudo().search([]).mapped('id')
 
-        # Union both sets
         all_type_ids = list(set(allocated_types + all_types))
 
         leave_types = request.env['hr.leave.type'].sudo().browse(all_type_ids).read(['id', 'name'])
@@ -314,7 +310,6 @@ class MobileApiHome(http.Controller):
         if not all([leave_type_id, date_from, date_to, reason]):
             return {"status": 400, "error": "Missing required fields"}
 
-        # 🔒 Prevent overlapping leave
         existing_leave = request.env['hr.leave'].sudo().search([
             ('employee_id', '=', employee.id),
             ('state', '!=', 'cancel'),
@@ -713,7 +708,7 @@ class MobileApiHome(http.Controller):
             "documents": result
         }
 
-    @http.route('/mobile/employee/document/download_base64', type='json', auth='user', csrf=False)
+    @http.route('/mobile/payslip/download_base64', type='json', auth='user', csrf=False)
     def download_payslip_pdf_base64(self, **kwargs):
         data = request.get_json_data()
         payslip_id = data.get('payslip_id')
