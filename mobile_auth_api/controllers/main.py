@@ -8,6 +8,8 @@ import json
 import logging
 import base64
 import math
+from odoo.exceptions import ValidationError, UserError
+
 
 _logger = logging.getLogger(__name__)
 
@@ -280,12 +282,10 @@ class MobileApiHome(http.Controller):
         ]).mapped('holiday_status_id.id')
 
         # Leave types that do NOT require allocation
-        open_types = request.env['hr.leave.type'].sudo().search([
-            ('requires_allocation', '=', False)
-        ]).mapped('id')
+        all_types = request.env['hr.leave.type'].sudo().search([]).mapped('id')
 
         # Union both sets
-        all_type_ids = list(set(allocated_types + open_types))
+        all_type_ids = list(set(allocated_types + all_types))
 
         leave_types = request.env['hr.leave.type'].sudo().browse(all_type_ids).read(['id', 'name'])
 
@@ -297,12 +297,15 @@ class MobileApiHome(http.Controller):
 
     @http.route('/mobile/leaves/create', type='json', auth='user', methods=['POST'], csrf=False)
     def create_leave(self, **kwargs):
+
         user = request.env.user
-        employee = request.env['hr.employee'].sudo().search([('user_id', '=', user.id)], limit=1)
+        employee = request.env['hr.employee'].sudo().search(
+            [('user_id', '=', user.id)], limit=1
+        )
         if not employee:
             return {"status": 400, "error": "No employee linked to this user"}
-        data = request.get_json_data()
 
+        data = request.get_json_data() or {}
         leave_type_id = data.get('leave_type_id')
         date_from = data.get('date_from')
         date_to = data.get('date_to')
@@ -310,6 +313,24 @@ class MobileApiHome(http.Controller):
 
         if not all([leave_type_id, date_from, date_to, reason]):
             return {"status": 400, "error": "Missing required fields"}
+
+        # 🔒 Prevent overlapping leave
+        existing_leave = request.env['hr.leave'].sudo().search([
+            ('employee_id', '=', employee.id),
+            ('state', '!=', 'cancel'),
+            ('request_date_from', '<=', date_to),
+            ('request_date_to', '>=', date_from),
+        ], limit=1)
+
+        if existing_leave:
+            return {
+                "status": 400,
+                "error": (
+                    f"Leave already exists from "
+                    f"{existing_leave.request_date_from} to "
+                    f"{existing_leave.request_date_to}"
+                )
+            }
 
         try:
             leave = request.env['hr.leave'].sudo().create({
@@ -319,13 +340,19 @@ class MobileApiHome(http.Controller):
                 'request_date_from': date_from,
                 'request_date_to': date_to,
             })
+
             return {
                 "status": 200,
                 "message": "Leave request submitted",
                 "leave_id": leave.id
             }
-        except Exception as e:
-            return {"status": 500, "error": str(e)}
+
+        except (ValidationError, UserError) as e:
+            return {
+                "status": 400,
+                "error": e.args[0]
+            }
+
 
     @http.route('/mobile/employee/profile', type='json', auth='user', csrf=False)
     def employee_profile(self, **kwargs):
