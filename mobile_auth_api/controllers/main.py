@@ -40,7 +40,6 @@ class MobileApiHome(http.Controller):
     @http.route('/mobile/login', type='json', auth='none', readonly=False)
     def mobile_login(self, **kw):
         ensure_db()
-        values = {}
 
         data = request.get_json_data() or {}
         login = data.get("login")
@@ -49,80 +48,98 @@ class MobileApiHome(http.Controller):
         if not login or not password:
             return {"status": 400, "error": "Missing login or password"}
 
-        # logout existing session (keeping your logic as-is)
+        # Logout existing session
         request.session.logout()
 
+        # ---------------- ALREADY LOGGED IN ----------------
         if request.httprequest.method == 'POST' and request.session.uid:
             user = request.env['res.users'].browse(request.session.uid)
+
+            employee = request.env['hr.employee'].sudo().search(
+                [('user_id', '=', user.id)], limit=1
+            )
+
             return {
                 "status": 200,
-                'uid': request.session.uid,
-                'db': request.session.db,
-                'username': request.session.login,
-                'auth_info': "Already Logged in",
+                "uid": request.session.uid,
+                "db": request.session.db,
+                "username": request.session.login,
+                "auth_info": "Already Logged in",
 
-                'name': user.name or "",
-                'street': user.partner_id.street or "",
-                'city': user.partner_id.city or "",
-                'mobile': user.partner_id.mobile or "",
-                'zip': user.partner_id.zip or "",
-                'country_id': user.partner_id.country_id.with_user(request.session.uid).code or "",
-                'state_id': user.partner_id.state_id.with_user(request.session.uid).code or "",
-                'profile_image_url': self.get_image_url('res.users', user.id, 'image_1920') or "",
+                # Partner
+                "name": user.name or "",
+                "street": user.partner_id.street or "",
+                "city": user.partner_id.city or "",
+                "zip": user.partner_id.zip or "",
+                "country_id": user.partner_id.country_id.code if user.partner_id.country_id else "",
+                "state_id": user.partner_id.state_id.code if user.partner_id.state_id else "",
+
+                # Employee
+                "job_title": employee.job_title if employee else "",
+                "birthday": employee.birthday.strftime('%d.%m.%Y') if employee and employee.birthday else "",
+                "number": employee.private_phone if employee else "",
+                "manager": employee.parent_id.name if employee and employee.parent_id else "",
+
+                "profile_image_url": self.get_image_url(
+                    'res.users', user.id, 'image_1920'
+                ) or "",
             }
 
+        # ---------------- LOGIN FLOW ----------------
         try:
-            values['databases'] = http.db_list()
-        except odoo.exceptions.AccessDenied:
-            values['databases'] = None
-
-        if request.httprequest.method == 'POST':
-            try:
-                credential = {
-                    key: value for key, value in data.items()
-                    if key in ['login', 'password', 'type'] and value
-                }
-                credential.setdefault('type', 'password')
-
-                auth_info = request.session.authenticate(request.db, credential)
-                request.params['login_success'] = True
-
-                return {
-                    "status": 200,
-                    'uid': request.session.uid,
-                    'db': request.session.db,
-                    'username': request.session.login,
-                    'auth_info': auth_info,
-
-                    'name': request.env.user.name or "",
-                    'street': request.env.user.partner_id.street or "",
-                    'city': request.env.user.partner_id.city or "",
-                    'mobile': request.env.user.partner_id.mobile or "",
-                    'zip': request.env.user.partner_id.zip or "",
-                    'country_id': request.env.user.partner_id.country_id.code or "",
-                    'state_id': request.env.user.partner_id.state_id.code or "",
-                    'profile_image_url': self.get_image_url(
-                        'res.users', request.env.user.id, 'image_1920'
-                    ) or "",
-                    'image_1920': request.env.user.image_1920 or "",
-                }
-
-            except odoo.exceptions.AccessDenied as e:
-                if e.args == odoo.exceptions.AccessDenied().args:
-                    return {
-                        "status": 401,
-                        'error': "Wrong login/password",
-                    }
-                else:
-                    return {
-                        "status": 400,
-                        'error': e.args[0],
-                    }
-        else:
-            return {
-                "status": 400,
-                'error': 'Invalid request',
+            credential = {
+                key: value for key, value in data.items()
+                if key in ['login', 'password', 'type'] and value
             }
+            credential.setdefault('type', 'password')
+
+            auth_info = request.session.authenticate(request.db, credential)
+            request.params['login_success'] = True
+
+            user = request.env.user
+            employee = request.env['hr.employee'].sudo().search(
+                [('user_id', '=', user.id)], limit=1
+            )
+
+            return {
+                "status": 200,
+                "uid": request.session.uid,
+                "db": request.session.db,
+                "username": request.session.login,
+                "auth_info": auth_info,
+
+                # Partner
+                "name": user.name or "",
+                "street": user.partner_id.street or "",
+                "city": user.partner_id.city or "",
+                "zip": user.partner_id.zip or "",
+                "country_id": user.partner_id.country_id.code if user.partner_id.country_id else "",
+                "state_id": user.partner_id.state_id.code if user.partner_id.state_id else "",
+
+                # Employee
+                "job_title": employee.job_title if employee else "",
+                "birthday": employee.birthday.strftime('%d.%m.%Y') if employee and employee.birthday else "",
+                "number": employee.private_phone if employee else "",
+                "manager": employee.parent_id.name if employee and employee.parent_id else "",
+
+                "profile_image_url": self.get_image_url(
+                    'res.users', user.id, 'image_1920'
+                ) or "",
+                "image_1920": user.image_1920 or "",
+            }
+
+        except odoo.exceptions.AccessDenied as e:
+            if e.args == odoo.exceptions.AccessDenied().args:
+                return {
+                    "status": 401,
+                    "error": "Wrong login/password"
+                }
+            else:
+                return {
+                    "status": 400,
+                    "error": e.args[0]
+                }
+
 
 
     def _get_default_expense_product(self):
@@ -462,7 +479,9 @@ class MobileApiHome(http.Controller):
         today_start = fields.Datetime.to_datetime(fields.Date.today())
         today_end = today_start.replace(hour=23, minute=59, second=59)
 
-        attendances = request.env['hr.attendance'].sudo().search([
+        Attendance = request.env['hr.attendance'].sudo()
+
+        attendances = Attendance.search([
             ('employee_id', '=', employee.id),
             ('check_in', '>=', today_start),
             ('check_in', '<=', today_end)
@@ -474,36 +493,57 @@ class MobileApiHome(http.Controller):
         break_end = None
 
         if attendances:
-            # First working check-in
-            first_work_att = next((att for att in attendances if not att.is_break and att.check_in), None)
+            # ---------------- CLOCK IN (first work check-in) ----------------
+            first_work_att = next(
+                (att for att in attendances if not att.is_break and att.check_in),
+                None
+            )
             if first_work_att:
                 clock_in = first_work_att.check_in.strftime("%I:%M:%S %p")
 
-            # Last working check-out
-            work_checkouts = [att.check_out for att in attendances if not att.is_break and att.check_out]
-            if work_checkouts:
-                clock_out = max(work_checkouts).strftime("%I:%M:%S %p")
-
-            # Last break check-in
-            break_checkins = [att.check_in for att in attendances if att.is_break and att.check_in]
+            # ---------------- BREAK START (last break_in) ----------------
+            break_checkins = [
+                att.check_in for att in attendances
+                if att.is_break and att.check_in
+            ]
             if break_checkins:
                 break_start = max(break_checkins).strftime("%I:%M:%S %p")
 
-            # Last break check-out
-            break_checkouts = [att.check_out for att in attendances if att.is_break and att.check_out]
+            # ---------------- BREAK END (last break_out) ----------------
+            break_checkouts = [
+                att.check_out for att in attendances
+                if att.is_break and att.check_out
+            ]
             if break_checkouts:
                 break_end = max(break_checkouts).strftime("%I:%M:%S %p")
+
+            # ---------------- FINAL CLOCK OUT ONLY ----------------
+            # clock_out shown ONLY if there is NO open work attendance
+            open_work = Attendance.search([
+                ('employee_id', '=', employee.id),
+                ('check_out', '=', False),
+                ('is_break', '=', False)
+            ], limit=1)
+
+            work_checkouts = [
+                att.check_out for att in attendances
+                if not att.is_break and att.check_out
+            ]
+
+            if work_checkouts and not open_work:
+                clock_out = max(work_checkouts).strftime("%I:%M:%S %p")
 
         return {
             "status": 200,
             "date": fields.Date.today().strftime("%d %b, %Y"),
             "time_logs": {
                 "clock_in": clock_in,
-                "clock_out": clock_out,
                 "break_start": break_start,
-                "break_end": break_end
+                "break_end": break_end,
+                "clock_out": clock_out
             }
         }
+
 
     @http.route('/mobile/payslip/dashboard', type='json', auth='user', csrf=False)
     def payslip_dashboard(self, **kwargs):
@@ -565,44 +605,59 @@ class MobileApiHome(http.Controller):
     @http.route('/mobile/payslip/list', type='json', auth='user', csrf=False)
     def get_payslip_list(self, **kwargs):
         user = request.env.user
-        employee = request.env['hr.employee'].sudo().search([('user_id', '=', user.id)], limit=1)
+        employee = request.env['hr.employee'].sudo().search(
+            [('user_id', '=', user.id)], limit=1
+        )
         if not employee:
             return {"success": False, "message": "No employee found"}
 
-        page = int(kwargs.get('page', 1))
-        limit = int(kwargs.get('limit', 10))
-        offset = (page - 1) * limit
-        search = kwargs.get('search', '')
-        sort = kwargs.get('sort', 'date_from desc')
-        year = kwargs.get('year')
+        # GET params (IMPORTANT)
+        params = request.httprequest.args
 
+        page = int(params.get('page', 1))
+        limit = int(params.get('limit', 10))
+        offset = (page - 1) * limit
+        search = params.get('search', '')
+        sort = params.get('sort', 'date_from desc')
+        year = params.get('year')
 
         domain = [('employee_id', '=', employee.id)]
+
         if search:
             domain += ['|', ('name', 'ilike', search), ('number', 'ilike', search)]
 
-        # Year filter (MAIN REQUIREMENT)
+        # ✅ CORRECT YEAR FILTER
         if year:
             try:
                 year = int(year)
-                date_from = f'{year}-01-01'
-                date_to = f'{year}-12-31'
+                year_start = f'{year}-01-01'
+                year_end = f'{year}-12-31'
+
                 domain += [
-                    ('date_from', '>=', date_from),
-                    ('date_to', '<=', date_to)
+                    ('date_from', '<=', year_end),
+                    ('date_to', '>=', year_start)
                 ]
             except ValueError:
                 return {"success": False, "message": "Invalid year format"}
 
         Payslip = request.env['hr.payslip'].sudo()
+
         total = Payslip.search_count(domain)
         total_pages = (total + limit - 1) // limit if limit else 1
 
-        payslips = Payslip.search(domain, order=sort, limit=limit, offset=offset)
+        payslips = Payslip.search(
+            domain,
+            order=sort,
+            limit=limit,
+            offset=offset
+        )
 
         data = []
         for slip in payslips:
-            net_amount = slip.line_ids.filtered(lambda l: l.code == 'NET').total if slip.line_ids else 0.0
+            net_amount = slip.line_ids.filtered(
+                lambda l: l.code == 'NET'
+            ).total if slip.line_ids else 0.0
+
             data.append({
                 'id': slip.id,
                 'name': slip.name,
@@ -619,6 +674,7 @@ class MobileApiHome(http.Controller):
             "total_pages": total_pages,
             "payslips": data
         }
+
 
     @http.route('/mobile/payslip/detail', type='json', auth='user', csrf=False)
     def payslip_detail(self, **kwargs):
@@ -1271,14 +1327,13 @@ class MobileApiHome(http.Controller):
     @http.route('/mobile/profile', type='json', auth='user', csrf=False)
     def mobile_profile(self, **kwargs):
         user = request.env.user
-
         if not user:
-            return {
-                "status": 401,
-                "message": "Session expired"
-            }
+            return {"status": 401, "message": "Session expired"}
 
         partner = user.partner_id
+        employee = request.env['hr.employee'].sudo().search(
+            [('user_id', '=', user.id)], limit=1
+        )
 
         return {
             "status": 200,
@@ -1287,14 +1342,100 @@ class MobileApiHome(http.Controller):
             "username": user.login,
             "auth_info": "Session Active",
 
+            # Partner info
             "name": user.name or "",
             "street": partner.street or "",
             "city": partner.city or "",
-            "mobile": partner.mobile or "",
             "zip": partner.zip or "",
             "country_id": partner.country_id.code if partner.country_id else "",
             "state_id": partner.state_id.code if partner.state_id else "",
-            "profile_image_url": self.get_image_url('res.users', user.id, 'image_1920') or "",
+
+            # Employee info
+            "job_title": employee.job_title if employee else "",
+            "birthday": employee.birthday.strftime('%d.%m.%Y') if employee and employee.birthday else "",
+            "number": employee.private_phone if employee else "",
+            "manager": employee.parent_id.name if employee and employee.parent_id else "",
+
+            # Image
+            "profile_image_url": self.get_image_url(
+                'res.users', user.id, 'image_1920'
+            ) or "",
             "image_1920": user.image_1920 or "",
         }
+
+    @http.route('/mobile/profile/update', type='json', auth='user', csrf=False)
+    def mobile_profile_update(self, **kwargs):
+        user = request.env.user
+        if not user:
+            return {
+                "status": 401,
+                "message": "Session expired"
+            }
+
+        data = request.get_json_data() or {}
+        partner = user.partner_id
+
+        employee = request.env['hr.employee'].sudo().search(
+            [('user_id', '=', user.id)], limit=1
+        )
+
+        # ---------------- UPDATE PARTNER ----------------
+        partner_vals = {}
+
+        if data.get('name'):
+            partner_vals['name'] = data.get('name')
+
+        if data.get('street'):
+            partner_vals['street'] = data.get('street')
+
+        if data.get('city'):
+            partner_vals['city'] = data.get('city')
+
+        if data.get('zip'):
+            partner_vals['zip'] = data.get('zip')
+
+        if data.get('country_id'):
+            country = request.env['res.country'].sudo().search(
+                [('code', '=', data.get('country_id'))], limit=1
+            )
+            if country:
+                partner_vals['country_id'] = country.id
+
+        if data.get('state_id'):
+            state = request.env['res.country.state'].sudo().search(
+                [('code', '=', data.get('state_id'))], limit=1
+            )
+            if state:
+                partner_vals['state_id'] = state.id
+
+        if partner_vals:
+            partner.sudo().write(partner_vals)
+
+        # ---------------- UPDATE EMPLOYEE ----------------
+        employee_vals = {}
+
+        if employee:
+            if data.get('job_title'):
+                employee_vals['job_title'] = data.get('job_title')
+
+            if data.get('birthday'):
+                try:
+                    employee_vals['birthday'] = fields.Date.from_string(data.get('birthday'))
+                except Exception:
+                    return {
+                        "status": 400,
+                        "message": "Invalid birthday format (use YYYY-MM-DD)"
+                    }
+
+            if data.get('number'):
+                employee_vals['private_phone'] = data.get('number')
+
+            if employee_vals:
+                employee.sudo().write(employee_vals)
+
+        return {
+            "status": 200,
+            "message": "Profile updated successfully"
+        }
+
 
