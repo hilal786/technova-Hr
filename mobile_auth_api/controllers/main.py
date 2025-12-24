@@ -48,10 +48,8 @@ class MobileApiHome(http.Controller):
         if not login or not password:
             return {"status": 400, "error": "Missing login or password"}
 
-        # Logout existing session
         request.session.logout()
 
-        # ---------------- ALREADY LOGGED IN ----------------
         if request.httprequest.method == 'POST' and request.session.uid:
             user = request.env['res.users'].browse(request.session.uid)
 
@@ -66,7 +64,6 @@ class MobileApiHome(http.Controller):
                 "username": request.session.login,
                 "auth_info": "Already Logged in",
 
-                # Partner
                 "name": user.name or "",
                 "street": user.partner_id.street or "",
                 "city": user.partner_id.city or "",
@@ -74,7 +71,6 @@ class MobileApiHome(http.Controller):
                 "country_id": user.partner_id.country_id.code if user.partner_id.country_id else "",
                 "state_id": user.partner_id.state_id.code if user.partner_id.state_id else "",
 
-                # Employee
                 "job_title": employee.job_title if employee else "",
                 "birthday": employee.birthday.strftime('%d.%m.%Y') if employee and employee.birthday else "",
                 "number": employee.private_phone if employee else "",
@@ -85,7 +81,6 @@ class MobileApiHome(http.Controller):
                 ) or "",
             }
 
-        # ---------------- LOGIN FLOW ----------------
         try:
             credential = {
                 key: value for key, value in data.items()
@@ -108,7 +103,6 @@ class MobileApiHome(http.Controller):
                 "username": request.session.login,
                 "auth_info": auth_info,
 
-                # Partner
                 "name": user.name or "",
                 "street": user.partner_id.street or "",
                 "city": user.partner_id.city or "",
@@ -116,7 +110,6 @@ class MobileApiHome(http.Controller):
                 "country_id": user.partner_id.country_id.code if user.partner_id.country_id else "",
                 "state_id": user.partner_id.state_id.code if user.partner_id.state_id else "",
 
-                # Employee
                 "job_title": employee.job_title if employee else "",
                 "birthday": employee.birthday.strftime('%d.%m.%Y') if employee and employee.birthday else "",
                 "number": employee.private_phone if employee else "",
@@ -183,24 +176,30 @@ class MobileApiHome(http.Controller):
     @http.route('/mobile/expenses/list', type='json', auth='user', methods=['POST'], csrf=False)
     def list_expenses(self, **kwargs):
         user = request.env.user
-        employee = request.env['hr.employee'].sudo().search([('user_id', '=', user.id)], limit=1)
+        employee = request.env['hr.employee'].sudo().search(
+            [('user_id', '=', user.id)], limit=1
+        )
+
         if not employee:
             return {"status": 400, "error": "No employee linked to this user"}
 
-        # Pagination parameters
-        page = int(kwargs.get('page', 1))
-        limit = int(kwargs.get('limit', 10))
+        data = request.get_json_data() or {}
+
+        page = int(data.get('page', 1))
+        limit = int(data.get('limit', 10))
         offset = (page - 1) * limit
 
-        # Search domain
         domain = [('employee_id', '=', employee.id)]
 
-        # Total count and page count
         total = request.env['hr.expense'].sudo().search_count(domain)
         total_pages = (total + limit - 1) // limit if limit else 1
 
-        # Paged records
-        expenses = request.env['hr.expense'].sudo().search(domain, offset=offset, limit=limit, order="date desc")
+        expenses = request.env['hr.expense'].sudo().search(
+            domain,
+            offset=offset,
+            limit=limit,
+            order="date desc"
+        )
 
         result = []
         for exp in expenses:
@@ -221,25 +220,23 @@ class MobileApiHome(http.Controller):
             "expenses": result
         }
 
+
     @http.route('/mobile/leaves/list', type='json', auth='user', methods=['POST'], csrf=False)
     def list_leaves(self, **kwargs):
         data = request.get_json_data()
         user = request.env.user
         domain = []
 
-        # If not admin, restrict to logged-in employee
         if not user.has_group('base.group_system'):
             employee = request.env['hr.employee'].sudo().search([('user_id', '=', user.id)], limit=1)
             if not employee:
                 return {"status": 400, "error": "No employee linked to this user"}
             domain.append(('employee_id', '=', employee.id))
         else:
-            # Admin can filter by employee_id
             employee_id = data.get('employee_id')
             if employee_id:
                 domain.append(('employee_id', '=', int(employee_id)))
 
-        # Pagination & search
         page = int(data.get('page', 1))
         limit = int(data.get('limit', 10))
         offset = (page - 1) * limit
@@ -374,10 +371,9 @@ class MobileApiHome(http.Controller):
             return {"status": 400, "error": "No employee linked to this user"}
 
         today = fields.Date.today()
-        start_week = today - timedelta(days=today.weekday())  # Monday
-        end_week = start_week + timedelta(days=6)  # Sunday
+        start_week = today - timedelta(days=today.weekday())
+        end_week = start_week + timedelta(days=6)
 
-        # Attendance Summary
         domain = [('employee_id', '=', employee.id), ('check_in', '>=', start_week), ('check_out', '<=', end_week)]
         attendances = request.env['hr.attendance'].sudo().search(domain)
 
@@ -424,7 +420,6 @@ class MobileApiHome(http.Controller):
             else:
                 attendance_summary["absent"] += 1
 
-        # Today's timesheet
         timesheets = request.env['account.analytic.line'].sudo().search_read([
             ('user_id', '=', employee.user_id.id),
             ('date', '=', today)
@@ -433,7 +428,6 @@ class MobileApiHome(http.Controller):
         timesheet_hours = sum(t['unit_amount'] for t in timesheets)
 
 
-        # Weekly bar chart (timesheet hours for past 7 days)
         chart_data = []
         for i in range(7):
             day = today - timedelta(days=i)
@@ -449,7 +443,6 @@ class MobileApiHome(http.Controller):
             })
 
 
-        # Sort the chart data by date ascending
         chart_data = sorted(chart_data, key=lambda x: x['date'])
 
         return {
@@ -493,7 +486,6 @@ class MobileApiHome(http.Controller):
         break_end = None
 
         if attendances:
-            # ---------------- CLOCK IN (first work check-in) ----------------
             first_work_att = next(
                 (att for att in attendances if not att.is_break and att.check_in),
                 None
@@ -501,7 +493,6 @@ class MobileApiHome(http.Controller):
             if first_work_att:
                 clock_in = first_work_att.check_in.strftime("%I:%M:%S %p")
 
-            # ---------------- BREAK START (last break_in) ----------------
             break_checkins = [
                 att.check_in for att in attendances
                 if att.is_break and att.check_in
@@ -509,7 +500,6 @@ class MobileApiHome(http.Controller):
             if break_checkins:
                 break_start = max(break_checkins).strftime("%I:%M:%S %p")
 
-            # ---------------- BREAK END (last break_out) ----------------
             break_checkouts = [
                 att.check_out for att in attendances
                 if att.is_break and att.check_out
@@ -517,8 +507,6 @@ class MobileApiHome(http.Controller):
             if break_checkouts:
                 break_end = max(break_checkouts).strftime("%I:%M:%S %p")
 
-            # ---------------- FINAL CLOCK OUT ONLY ----------------
-            # clock_out shown ONLY if there is NO open work attendance
             open_work = Attendance.search([
                 ('employee_id', '=', employee.id),
                 ('check_out', '=', False),
@@ -552,14 +540,12 @@ class MobileApiHome(http.Controller):
         if not employee:
             return {"status": 400, "error": "Employee not found for this user"}
 
-        # Today date
         today = fields.Date.today()
 
-        # --- 1. Upcoming Payslips (limit 2) ---
         upcoming_payslips = request.env['hr.payslip'].sudo().search([
             ('employee_id', '=', employee.id),
             ('date_to', '>=', today),
-            ('state', 'in', ['draft', 'verify', 'done'])  # optional: based on status needed
+            ('state', 'in', ['draft', 'verify', 'done'])
         ], order='date_from ASC', limit=2)
 
         payslip_list = [{
@@ -570,14 +556,12 @@ class MobileApiHome(http.Controller):
                 lambda l: l.code == 'NET').total,
         } for payslip in upcoming_payslips]
 
-        # --- 2. Working Hours Today ---
         today_timesheets = request.env['account.analytic.line'].sudo().search([
             ('user_id', '=', user.id),
             ('date', '=', today)
         ])
         today_hours = sum(today_timesheets.mapped('unit_amount'))
 
-        # --- 3. Weekly Bar Chart (Mon-Sun) ---
         start_week = today - timedelta(days=today.weekday())
         week_chart = []
         for i in range(7):
@@ -588,7 +572,7 @@ class MobileApiHome(http.Controller):
             ])
             total = sum(timesheets.mapped('unit_amount'))
             week_chart.append({
-                "day": day.strftime('%a'),  # Mon, Tue, ...
+                "day": day.strftime('%a'),
                 "date": day.strftime('%Y-%m-%d'),
                 "hours": round(total, 2)
             })
@@ -611,7 +595,6 @@ class MobileApiHome(http.Controller):
         if not employee:
             return {"success": False, "message": "No employee found"}
 
-        # GET params (IMPORTANT)
         params = request.httprequest.args
 
         page = int(params.get('page', 1))
@@ -626,7 +609,6 @@ class MobileApiHome(http.Controller):
         if search:
             domain += ['|', ('name', 'ilike', search), ('number', 'ilike', search)]
 
-        # ✅ CORRECT YEAR FILTER
         if year:
             try:
                 year = int(year)
@@ -687,7 +669,6 @@ class MobileApiHome(http.Controller):
         if not payslip or not payslip.employee_id:
             return {"status": 404, "error": "Payslip not found"}
 
-        # Access control: check if the user is allowed to see this payslip
         user = request.env.user
         if not user.has_group('hr_payroll.group_hr_payroll_user') and payslip.employee_id.user_id.id != user.id:
             return {"status": 403, "error": "You do not have permission to access this payslip."}
@@ -720,18 +701,15 @@ class MobileApiHome(http.Controller):
         data = request.get_json_data()
         user = request.env.user
 
-        # Get employee linked to current user
         employee = request.env['hr.employee'].sudo().search([('user_id', '=', user.id)], limit=1)
         if not employee:
             return {"status": 400, "error": "No employee found"}
 
-        # Pagination & filters
         page = int(data.get('page', 1))
         limit = int(data.get('limit', 10))
         offset = (page - 1) * limit
         search = data.get('search', '')
 
-        # Domain for current employee
         domain = [('employee_id', '=', employee.id)]
         if search:
             domain += [('document_id.name', 'ilike', search)]
@@ -742,17 +720,16 @@ class MobileApiHome(http.Controller):
 
         documents = Document.search(domain, limit=limit, offset=offset, order="issue_date desc")
 
-        # Prepare response
         result = []
         for doc in documents:
             result.append({
                 "id": doc.id,
-                "name": doc.document_id.name,  # Document type
-                "document_number": doc.name,  # Document number
+                "name": doc.document_id.name,
+                "document_number": doc.name,
                 "issue_date": doc.issue_date.strftime('%d/%m/%Y - %I:%M %p') if doc.issue_date else '',
                 "expiry_date": doc.expiry_date.strftime('%d/%m/%Y') if doc.expiry_date else '',
                 "description": doc.description or '',
-                "has_attachment": bool(doc.doc_attachment_ids)  # True if attachment exists
+                "has_attachment": bool(doc.doc_attachment_ids)
             })
 
         return {
@@ -769,7 +746,6 @@ class MobileApiHome(http.Controller):
         data = request.get_json_data()
         payslip_id = data.get('payslip_id')
 
-        # payslip_id = kwargs.get('payslip_id')
         if not payslip_id:
             return {"status": 400, "error": "Missing payslip_id"}
 
@@ -848,7 +824,6 @@ class MobileApiHome(http.Controller):
 
         today = date.today()
 
-        # Build domain for announcements
         domain = [
             ('state', '=', 'approved'),
             # ('date_start', '<=', today),
@@ -934,7 +909,6 @@ class MobileApiHome(http.Controller):
                 "message": "Office location not configured"
             }
 
-        # GPS check for ALL actions
         distance = self._distance_in_meters(lat, lon, office_lat, office_lon)
         if distance > allowed_radius:
             return {
@@ -958,7 +932,6 @@ class MobileApiHome(http.Controller):
 
         now = fields.Datetime.now()
 
-        # ---------------- CHECK IN ----------------
         if action == 'check_in':
             if open_work or open_break:
                 return {
@@ -980,7 +953,6 @@ class MobileApiHome(http.Controller):
                 "attendance_id": rec.id
             }
 
-        # ---------------- CHECK OUT ----------------
         if action == 'check_out':
             if open_break:
                 return {
@@ -1006,7 +978,6 @@ class MobileApiHome(http.Controller):
                 "attendance_id": open_work.id
             }
 
-        # ---------------- BREAK IN ----------------
         if action == 'break_in':
             if not open_work:
                 return {
@@ -1020,7 +991,6 @@ class MobileApiHome(http.Controller):
                     "message": "Already on break"
                 }
 
-            # close work
             open_work.write({
                 'check_out': now,
                 'out_latitude': lat,
@@ -1041,7 +1011,6 @@ class MobileApiHome(http.Controller):
                 "attendance_id": break_rec.id
             }
 
-        # ---------------- BREAK OUT ----------------
         if action == 'break_out':
             if not open_break:
                 return {
@@ -1049,7 +1018,6 @@ class MobileApiHome(http.Controller):
                     "message": "No active break found"
                 }
 
-            # close break
             open_break.write({
                 'check_out': now,
                 'out_latitude': lat,
@@ -1379,54 +1347,30 @@ class MobileApiHome(http.Controller):
             [('user_id', '=', user.id)], limit=1
         )
 
-        # ---------------- UPDATE PARTNER ----------------
-        partner_vals = {}
-
         if data.get('name'):
-            partner_vals['name'] = data.get('name')
+            user.sudo().write({
+                'name': data.get('name')
+            })
 
-        if data.get('street'):
-            partner_vals['street'] = data.get('street')
+        if data.get('image_1920'):
+            user.sudo().write({
+                'image_1920': data.get('image_1920')
+            })
 
-        if data.get('city'):
-            partner_vals['city'] = data.get('city')
-
-        if data.get('zip'):
-            partner_vals['zip'] = data.get('zip')
-
-        if data.get('country_id'):
-            country = request.env['res.country'].sudo().search(
-                [('code', '=', data.get('country_id'))], limit=1
-            )
-            if country:
-                partner_vals['country_id'] = country.id
-
-        if data.get('state_id'):
-            state = request.env['res.country.state'].sudo().search(
-                [('code', '=', data.get('state_id'))], limit=1
-            )
-            if state:
-                partner_vals['state_id'] = state.id
-
-        if partner_vals:
-            partner.sudo().write(partner_vals)
-
-        # ---------------- UPDATE EMPLOYEE ----------------
         employee_vals = {}
 
         if employee:
-            if data.get('job_title'):
-                employee_vals['job_title'] = data.get('job_title')
-
             if data.get('birthday'):
                 try:
-                    employee_vals['birthday'] = fields.Date.from_string(data.get('birthday'))
+                    employee_vals['birthday'] = fields.Date.from_string(
+                        data.get('birthday')
+                    )
                 except Exception:
                     return {
                         "status": 400,
                         "message": "Invalid birthday format (use YYYY-MM-DD)"
                     }
-
+                
             if data.get('number'):
                 employee_vals['private_phone'] = data.get('number')
 
@@ -1437,5 +1381,6 @@ class MobileApiHome(http.Controller):
             "status": 200,
             "message": "Profile updated successfully"
         }
+
 
 
