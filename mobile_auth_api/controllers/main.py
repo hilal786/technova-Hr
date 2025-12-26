@@ -8,6 +8,8 @@ import json
 import logging
 import base64
 import math
+import re
+
 from odoo.exceptions import ValidationError, UserError
 
 
@@ -1134,11 +1136,27 @@ class MobileApiHome(http.Controller):
         user = request.env.user
         Task = request.env['project.task'].sudo()
 
+        data = request.get_json_data() or {}
+
+        page = int(data.get('page', 1))
+        limit = int(data.get('limit', 10))
+        offset = (page - 1) * limit
+
         domain = [
             ('user_ids', 'in', user.id)
         ]
 
-        tasks = Task.search(domain, order='id desc')
+        if data.get('status'):
+            domain.append(('stage_id.name', '=', data.get('status')))
+
+        total = Task.search_count(domain)
+
+        tasks = Task.search(
+            domain,
+            order='id desc',
+            limit=limit,
+            offset=offset
+        )
 
         result = []
         for task in tasks:
@@ -1148,15 +1166,20 @@ class MobileApiHome(http.Controller):
                 "project": task.project_id.name if task.project_id else "",
                 "stage_id": task.stage_id.id if task.stage_id else None,
                 "status": task.stage_id.name if task.stage_id else "",
-                "deadline": task.date_deadline,
+                "deadline": task.date_deadline or False,
                 "priority": task.priority,
             })
 
         return {
             "status": 200,
+            "page": page,
+            "limit": limit,
+            "total": total,
+            "total_pages": (total + limit - 1) // limit if limit else 1,
             "count": len(result),
             "tasks": result
         }
+
 
     @http.route('/mobile/tasks/change_status', type='json', auth='user', csrf=False)
     def mobile_task_change_status(self, **kwargs):
@@ -1353,8 +1376,27 @@ class MobileApiHome(http.Controller):
             })
 
         if data.get('image_1920'):
+            image_data = data.get('image_1920')
+
+            if image_data.startswith('data:image'):
+                image_data = re.sub(r'^data:image/.+;base64,', '', image_data)
+
+            try:
+                decoded = base64.b64decode(image_data)
+            except Exception:
+                return {
+                    "status": 400,
+                    "message": "Invalid image data"
+                }
+
+            if decoded.strip().startswith(b'<svg'):
+                return {
+                    "status": 400,
+                    "message": "SVG images are not supported. Please upload PNG or JPG."
+                }
+
             user.sudo().write({
-                'image_1920': data.get('image_1920')
+                'image_1920': image_data
             })
 
         employee_vals = {}
@@ -1370,7 +1412,7 @@ class MobileApiHome(http.Controller):
                         "status": 400,
                         "message": "Invalid birthday format (use YYYY-MM-DD)"
                     }
-                
+                    
             if data.get('number'):
                 employee_vals['private_phone'] = data.get('number')
 
@@ -1382,5 +1424,24 @@ class MobileApiHome(http.Controller):
             "message": "Profile updated successfully"
         }
 
+    @http.route('/mobile/tasks/status', type='json', auth='user', methods=['POST'], csrf=False)
+    def mobile_task_status_list(self, **kwargs):
+
+        Stage = request.env['project.task.type'].sudo()
+
+        stages = Stage.search([], order='sequence asc')
+
+        result = []
+        for stage in stages:
+            result.append({
+                "id": stage.id,
+                "name": stage.name
+            })
+
+        return {
+            "status": 200,
+            "count": len(result),
+            "statuses": result
+        }
 
 
