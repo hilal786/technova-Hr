@@ -9,14 +9,28 @@ import logging
 import base64
 import math
 import re
-
+import pytz
+from datetime import time
 from odoo.exceptions import ValidationError, UserError
 
-
-_logger = logging.getLogger(__name__)
-
-
 class MobileApiHome(http.Controller):
+
+    def _get_user_day_range_utc(self):
+        user = request.env.user
+        tz_name = user.tz or 'UTC'
+        user_tz = pytz.timezone(tz_name)
+
+        now_user = datetime.now(user_tz)
+        today_user = now_user.date()
+
+        start_user = user_tz.localize(datetime.combine(today_user, time.min))
+        end_user = user_tz.localize(datetime.combine(today_user, time.max))
+
+        return (
+            start_user.astimezone(pytz.utc),
+            end_user.astimezone(pytz.utc),
+            today_user
+        )
 
     def get_image_url(self, model, id, field):
         base_url = request.env['ir.config_parameter'].sudo().get_param('web.base.url')
@@ -465,14 +479,14 @@ class MobileApiHome(http.Controller):
     @http.route('/mobile/attendance/logs', type='json', auth='user', csrf=False)
     def mobile_attendance_log(self, **kwargs):
         user = request.env.user
+        user_tz = pytz.timezone(user.tz or 'UTC')
         employee = request.env['hr.employee'].sudo().search(
             [('user_id', '=', user.id)], limit=1
         )
         if not employee:
             return {"status": 400, "error": "Employee not found for user."}
 
-        today_start = fields.Datetime.to_datetime(fields.Date.today())
-        today_end = today_start.replace(hour=23, minute=59, second=59)
+        today_start, today_end, today_user = self._get_user_day_range_utc()
 
         Attendance = request.env['hr.attendance'].sudo()
 
@@ -493,21 +507,21 @@ class MobileApiHome(http.Controller):
                 None
             )
             if first_work_att:
-                clock_in = first_work_att.check_in.strftime("%I:%M:%S %p")
+                clock_in = first_work_att.check_in.astimezone(user_tz).strftime("%I:%M:%S %p")
 
             break_checkins = [
                 att.check_in for att in attendances
                 if att.is_break and att.check_in
             ]
             if break_checkins:
-                break_start = max(break_checkins).strftime("%I:%M:%S %p")
+                break_start = max(break_checkins).astimezone(user_tz).strftime("%I:%M:%S %p")
 
             break_checkouts = [
                 att.check_out for att in attendances
                 if att.is_break and att.check_out
             ]
             if break_checkouts:
-                break_end = max(break_checkouts).strftime("%I:%M:%S %p")
+                break_end = max(break_checkouts).astimezone(user_tz).strftime("%I:%M:%S %p")
 
             open_work = Attendance.search([
                 ('employee_id', '=', employee.id),
@@ -521,11 +535,11 @@ class MobileApiHome(http.Controller):
             ]
 
             if work_checkouts and not open_work:
-                clock_out = max(work_checkouts).strftime("%I:%M:%S %p")
+                clock_out = max(work_checkouts).astimezone(user_tz).strftime("%I:%M:%S %p")
 
         return {
             "status": 200,
-            "date": fields.Date.today().strftime("%d %b, %Y"),
+            "date": today_user.strftime("%d %b, %Y"),
             "time_logs": {
                 "clock_in": clock_in,
                 "break_start": break_start,
@@ -538,15 +552,18 @@ class MobileApiHome(http.Controller):
     @http.route('/mobile/payslip/dashboard', type='json', auth='user', csrf=False)
     def payslip_dashboard(self, **kwargs):
         user = request.env.user
-        employee = request.env['hr.employee'].sudo().search([('user_id', '=', user.id)], limit=1)
+        employee = request.env['hr.employee'].sudo().search(
+            [('user_id', '=', user.id)], limit=1
+        )
         if not employee:
             return {"status": 400, "error": "Employee not found for this user"}
 
-        today = fields.Date.today()
+        user_tz = pytz.timezone(user.tz or 'UTC')
+        today_user = datetime.now(user_tz).date()
 
         upcoming_payslips = request.env['hr.payslip'].sudo().search([
             ('employee_id', '=', employee.id),
-            ('date_to', '>=', today),
+            ('date_to', '>=', today_user),
             ('state', 'in', ['draft', 'verify', 'done'])
         ], order='date_from ASC', limit=2)
 
@@ -554,18 +571,19 @@ class MobileApiHome(http.Controller):
             "name": payslip.name,
             "from_date": payslip.date_from.strftime('%d.%m.%Y'),
             "to_date": payslip.date_to.strftime('%d.%m.%Y'),
-            "salary": payslip.amount if hasattr(payslip, 'amount') else payslip.line_ids.filtered(
-                lambda l: l.code == 'NET').total,
+            "salary": payslip.amount if hasattr(payslip, 'amount')
+            else payslip.line_ids.filtered(lambda l: l.code == 'NET').total,
         } for payslip in upcoming_payslips]
 
         today_timesheets = request.env['account.analytic.line'].sudo().search([
             ('user_id', '=', user.id),
-            ('date', '=', today)
+            ('date', '=', today_user)
         ])
         today_hours = sum(today_timesheets.mapped('unit_amount'))
 
-        start_week = today - timedelta(days=today.weekday())
+        start_week = today_user - timedelta(days=today_user.weekday())
         week_chart = []
+
         for i in range(7):
             day = start_week + timedelta(days=i)
             timesheets = request.env['account.analytic.line'].sudo().search([
@@ -900,6 +918,8 @@ class MobileApiHome(http.Controller):
                 "success": False,
                 "message": "Employee not linked with user"
             }
+        
+        today_start, today_end, today_user = self._get_user_day_range_utc()
 
         office_lat = employee.office_latitude
         office_lon = employee.office_longitude
@@ -923,13 +943,17 @@ class MobileApiHome(http.Controller):
         open_work = Attendance.search([
             ('employee_id', '=', employee.id),
             ('check_out', '=', False),
-            ('is_break', '=', False)
+            ('is_break', '=', False),
+            ('check_in', '>=', today_start),
+            ('check_in', '<=', today_end),
         ], order='check_in desc', limit=1)
 
         open_break = Attendance.search([
             ('employee_id', '=', employee.id),
             ('check_out', '=', False),
-            ('is_break', '=', True)
+            ('is_break', '=', True),
+            ('check_in', '>=', today_start),
+            ('check_in', '<=', today_end),
         ], order='check_in desc', limit=1)
 
         now = fields.Datetime.now()
@@ -1256,6 +1280,18 @@ class MobileApiHome(http.Controller):
                 "message": "Employee not linked with user"
             }
 
+        user_tz = pytz.timezone(user.tz or 'UTC')
+
+        start_user = user_tz.localize(
+            datetime.combine(fields.Date.from_string(start_date), time.min)
+        )
+        end_user = user_tz.localize(
+            datetime.combine(fields.Date.from_string(end_date), time.max)
+        )
+
+        start_utc = start_user.astimezone(pytz.utc)
+        end_utc = end_user.astimezone(pytz.utc)
+
         calendar_data = []
 
         tasks = request.env['project.task'].sudo().search([
@@ -1294,8 +1330,8 @@ class MobileApiHome(http.Controller):
             })
 
         events = request.env['event.event'].sudo().search([
-            ('date_begin', '>=', start_date),
-            ('date_begin', '<=', end_date)
+            ('date_begin', '<=', end_utc),
+            ('date_end', '>=', start_utc)
         ])
 
         for event in events:
@@ -1303,8 +1339,8 @@ class MobileApiHome(http.Controller):
                 "type": "event",
                 "id": event.id,
                 "title": event.name,
-                "start": event.date_begin,
-                "end": event.date_end,
+                "start": event.date_begin.astimezone(user_tz),
+                "end": event.date_end.astimezone(user_tz),
                 "color": "#2196F3",
                 "location": event.address_id.name if event.address_id else ""
             })
