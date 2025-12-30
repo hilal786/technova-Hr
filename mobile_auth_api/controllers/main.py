@@ -1383,6 +1383,9 @@ class MobileApiHome(http.Controller):
             "number": employee.private_phone if employee else "",
             "manager": employee.parent_id.name if employee and employee.parent_id else "",
 
+            # Timezone
+            "timezone": user.tz or "UTC",
+
             # Profile Image
             "profile_image_url": self.get_image_url(
                 'res.users', user.id, 'image_1920'
@@ -1409,6 +1412,17 @@ class MobileApiHome(http.Controller):
         if data.get('name'):
             user.sudo().write({
                 'name': data.get('name')
+            })
+
+        if data.get('timezone'):
+            tz = data.get('timezone')
+            if tz not in pytz.common_timezones:
+                return {
+                    "status": 400,
+                    "message": "Invalid timezone"
+                }
+            user.sudo().write({
+                'tz': tz
             })
 
         if data.get('image_1920'):
