@@ -507,21 +507,21 @@ class MobileApiHome(http.Controller):
                 None
             )
             if first_work_att:
-                clock_in = first_work_att.check_in.astimezone(user_tz).strftime("%I:%M:%S %p")
+                clock_in = fields.Datetime.context_timestamp(user, first_work_att.check_in).strftime("%I:%M:%S %p")
 
             break_checkins = [
                 att.check_in for att in attendances
                 if att.is_break and att.check_in
             ]
             if break_checkins:
-                break_start = max(break_checkins).astimezone(user_tz).strftime("%I:%M:%S %p")
+                break_start = fields.Datetime.context_timestamp(user, max(break_checkins)).strftime("%I:%M:%S %p")
 
             break_checkouts = [
                 att.check_out for att in attendances
                 if att.is_break and att.check_out
             ]
             if break_checkouts:
-                break_end = max(break_checkouts).astimezone(user_tz).strftime("%I:%M:%S %p")
+                break_end = fields.Datetime.context_timestamp(user, max(break_checkouts)).strftime("%I:%M:%S %p")
 
             open_work = Attendance.search([
                 ('employee_id', '=', employee.id),
@@ -535,7 +535,7 @@ class MobileApiHome(http.Controller):
             ]
 
             if work_checkouts and not open_work:
-                clock_out = max(work_checkouts).astimezone(user_tz).strftime("%I:%M:%S %p")
+                clock_out = fields.Datetime.context_timestamp(user, max(work_checkouts)).strftime("%I:%M:%S %p")
 
         return {
             "status": 200,
@@ -1339,8 +1339,8 @@ class MobileApiHome(http.Controller):
                 "type": "event",
                 "id": event.id,
                 "title": event.name,
-                "start": event.date_begin.astimezone(user_tz),
-                "end": event.date_end.astimezone(user_tz),
+                "start": fields.Datetime.context_timestamp(user, event.date_begin),
+                "end": fields.Datetime.context_timestamp(user, event.date_end),
                 "color": "#2196F3",
                 "location": event.address_id.name if event.address_id else ""
             })
@@ -1383,7 +1383,7 @@ class MobileApiHome(http.Controller):
             "number": employee.private_phone if employee else "",
             "manager": employee.parent_id.name if employee and employee.parent_id else "",
 
-            # Image
+            # Profile Image
             "profile_image_url": self.get_image_url(
                 'res.users', user.id, 'image_1920'
             ) or "",
