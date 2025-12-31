@@ -537,6 +537,27 @@ class MobileApiHome(http.Controller):
             if work_checkouts and not open_work:
                 clock_out = fields.Datetime.context_timestamp(user, max(work_checkouts)).strftime("%I:%M:%S %p")
 
+        last_checkedin_logs = None
+
+        last_open_attendance = Attendance.search([
+            ('employee_id', '=', employee.id),
+            ('check_out', '=', False),
+            ('is_break', '=', False)
+        ], order='check_in desc', limit=1)
+
+        if last_open_attendance:
+            last_checkedin_logs = {
+                "date": fields.Datetime.context_timestamp(
+                    user, last_open_attendance.check_in
+                ).strftime("%d %b, %Y"),
+                "clock_in": fields.Datetime.context_timestamp(
+                    user, last_open_attendance.check_in
+                ).strftime("%I:%M:%S %p"),
+                "break_start": None,
+                "break_end": None,
+                "clock_out": None
+            }
+
         return {
             "status": 200,
             "date": today_user.strftime("%d %b, %Y"),
@@ -545,7 +566,8 @@ class MobileApiHome(http.Controller):
                 "break_start": break_start,
                 "break_end": break_end,
                 "clock_out": clock_out
-            }
+            },
+            "last_checkedin_logs": last_checkedin_logs
         }
 
 
