@@ -1516,4 +1516,160 @@ class MobileApiHome(http.Controller):
             "statuses": result
         }
 
+    @http.route('/mobile/chat/channel', type='json', auth='user', methods=['POST'], csrf=False)
+    def get_or_create_chat_channel(self, **kwargs):
+        """
+        Get or create a direct chat channel between
+        logged-in user and another user.
+        """
 
+        data = request.get_json_data() or {}
+        target_user_id = data.get('user_id')
+
+        if not target_user_id:
+            return {
+                "status": 400,
+                "error": "user_id is required"
+            }
+
+        env = request.env
+        current_user = env.user
+        current_partner = current_user.partner_id
+
+        target_user = env['res.users'].sudo().browse(int(target_user_id))
+        if not target_user.exists():
+            return {
+                "status": 404,
+                "error": "Target user not found"
+            }
+
+        target_partner = target_user.partner_id
+
+        Channel = env['discuss.channel'].sudo()
+
+        #SAFE search: direct chat with exactly these two partners
+        channel = Channel.search([
+            ('channel_type', '=', 'chat'),
+            ('channel_partner_ids', 'in', [current_partner.id]),
+            ('channel_partner_ids', 'in', [target_partner.id]),
+        ], limit=1)
+
+        #Create if missing
+        if not channel:
+            channel = Channel.create({
+                'channel_type': 'chat',
+                'channel_partner_ids': [
+                    (4, current_partner.id),
+                    (4, target_partner.id),
+                ],
+            })
+
+        return {
+            "status": 200,
+            "channel_id": channel.id,
+            "channel_name": channel.name,
+            "participants": [
+                current_partner.name,
+                target_partner.name
+            ]
+        }
+        
+    @http.route('/mobile/chat/message/send', type='json', auth='user', methods=['POST'], csrf=False)
+    def send_chat_message(self, **kwargs):
+        data = request.get_json_data() or {}
+        channel_id = data.get('channel_id')
+        body = data.get('body')
+
+        if not channel_id or not body:
+            return {"status": 400, "error": "channel_id and body are required"}
+
+        channel = request.env['discuss.channel'].sudo().browse(int(channel_id))
+        if not channel.exists():
+            return {"status": 404, "error": "Channel not found"}
+
+        message = channel.message_post(
+            body=body,
+            message_type='comment',
+            subtype_xmlid='mail.mt_comment'
+        )
+
+        return {
+            "status": 200,
+            "message_id": message.id,
+            "channel_id": channel.id
+        }
+
+
+    @http.route('/mobile/chat/messages', type='json', auth='user', methods=['POST'], csrf=False)
+    def get_chat_messages(self, **kwargs):
+        data = request.get_json_data() or {}
+        channel_id = data.get('channel_id')
+        limit = int(data.get('limit', 20))
+
+        if not channel_id:
+            return {"status": 400, "error": "channel_id is required"}
+
+        messages = request.env['mail.message'].sudo().search(
+            [
+                ('model', '=', 'discuss.channel'),
+                ('res_id', '=', int(channel_id)),
+            ],
+            order='id desc',
+            limit=limit
+        )
+
+        result = []
+        for msg in messages:
+            result.append({
+                "message_id": msg.id,
+                "body": msg.body,
+                "author": msg.author_id.name,
+                "date": msg.create_date
+            })
+
+        return {
+            "status": 200,
+            "messages": list(reversed(result))
+        }
+
+    @http.route('/mobile/chat/unread_count', type='json', auth='user', methods=['POST'], csrf=False)
+    def unread_count(self, **kwargs):
+        partner = request.env.user.partner_id
+
+        members = request.env['discuss.channel.member'].sudo().search([
+            ('partner_id', '=', partner.id)
+        ])
+
+        total = sum(m.message_unread_counter for m in members)
+
+        return {
+            "status": 200,
+            "unread_count": total
+        }
+    
+    @http.route('/mobile/chat/list', type='json', auth='user', methods=['POST'], csrf=False)
+    def chat_list(self, **kwargs):
+        partner = request.env.user.partner_id
+
+        members = request.env['discuss.channel.member'].sudo().search(
+            [('partner_id', '=', partner.id)],
+            order='last_interest_dt desc'
+        )
+
+        chats = []
+        for m in members:
+            channel = m.channel_id
+            last_msg = channel.message_ids[:1]
+
+            chats.append({
+                "channel_id": channel.id,
+                "channel_name": channel.name,
+                "unread_count": m.message_unread_counter,
+                "last_message": last_msg.body if last_msg else "",
+                "last_message_date": last_msg.create_date if last_msg else None,
+            })
+
+        return {
+            "status": 200,
+            "chats": chats
+        }
