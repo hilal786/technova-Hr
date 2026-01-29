@@ -1415,86 +1415,44 @@ class MobileApiHome(http.Controller):
             "image_1920": user.image_1920 or "",
         }
 
-    @http.route('/mobile/profile/update', type='json', auth='user', csrf=False)
+    @http.route('/mobile/profile/update', type='http', auth='user', methods=['POST'], csrf=False)
     def mobile_profile_update(self, **kwargs):
-        user = request.env.user
-        if not user:
-            return {
-                "status": 401,
-                "message": "Session expired"
-            }
 
-        data = request.get_json_data() or {}
+        user = request.env.user
         partner = user.partner_id
 
-        employee = request.env['hr.employee'].sudo().search(
-            [('user_id', '=', user.id)], limit=1
-        )
+        name = kwargs.get('name')
+        timezone = kwargs.get('timezone')
+        number = kwargs.get('number')
 
-        if data.get('name'):
-            user.sudo().write({
-                'name': data.get('name')
-            })
+        if name:
+            partner.sudo().write({'name': name})
 
-        if data.get('timezone'):
-            tz = data.get('timezone')
-            if tz not in pytz.common_timezones:
-                return {
+        if timezone:
+            if timezone not in pytz.common_timezones:
+                return json.dumps({
                     "status": 400,
                     "message": "Invalid timezone"
-                }
-            user.sudo().write({
-                'tz': tz
+                })
+            user.sudo().write({'tz': timezone})
+
+        if number:
+            partner.sudo().write({'phone': number})
+
+        image_file = request.httprequest.files.get("image")
+
+        if image_file:
+            image_base64 = base64.b64encode(image_file.read())
+            partner.sudo().write({
+                "image_1920": image_base64
             })
 
-        if data.get('image_1920'):
-            image_data = data.get('image_1920')
-
-            if image_data.startswith('data:image'):
-                image_data = re.sub(r'^data:image/.+;base64,', '', image_data)
-
-            try:
-                decoded = base64.b64decode(image_data)
-            except Exception:
-                return {
-                    "status": 400,
-                    "message": "Invalid image data"
-                }
-
-            if decoded.strip().startswith(b'<svg'):
-                return {
-                    "status": 400,
-                    "message": "SVG images are not supported. Please upload PNG or JPG."
-                }
-
-            user.sudo().write({
-                'image_1920': image_data
-            })
-
-        employee_vals = {}
-
-        if employee:
-            if data.get('birthday'):
-                try:
-                    employee_vals['birthday'] = fields.Date.from_string(
-                        data.get('birthday')
-                    )
-                except Exception:
-                    return {
-                        "status": 400,
-                        "message": "Invalid birthday format (use YYYY-MM-DD)"
-                    }
-                    
-            if data.get('number'):
-                employee_vals['private_phone'] = data.get('number')
-
-            if employee_vals:
-                employee.sudo().write(employee_vals)
-
-        return {
+        return json.dumps({
             "status": 200,
             "message": "Profile updated successfully"
-        }
+        })
+
+
 
     @http.route('/mobile/tasks/status', type='json', auth='user', methods=['POST'], csrf=False)
     def mobile_task_status_list(self, **kwargs):
@@ -1603,19 +1561,29 @@ class MobileApiHome(http.Controller):
     @http.route('/mobile/chat/messages', type='json', auth='user', methods=['POST'], csrf=False)
     def get_chat_messages(self, **kwargs):
         data = request.get_json_data() or {}
+
         channel_id = data.get('channel_id')
+        page = int(data.get('page', 1))
         limit = int(data.get('limit', 20))
+        offset = (page - 1) * limit
 
         if not channel_id:
             return {"status": 400, "error": "channel_id is required"}
 
-        messages = request.env['mail.message'].sudo().search(
-            [
-                ('model', '=', 'discuss.channel'),
-                ('res_id', '=', int(channel_id)),
-            ],
+        domain = [
+            ('model', '=', 'discuss.channel'),
+            ('res_id', '=', int(channel_id)),
+        ]
+
+        Message = request.env['mail.message'].sudo()
+
+        total = Message.search_count(domain)
+
+        messages = Message.search(
+            domain,
             order='id desc',
-            limit=limit
+            limit=limit,
+            offset=offset
         )
 
         result = []
@@ -1629,6 +1597,10 @@ class MobileApiHome(http.Controller):
 
         return {
             "status": 200,
+            "page": page,
+            "limit": limit,
+            "total_records": total,
+            "total_pages": (total + limit - 1) // limit,
             "messages": list(reversed(result))
         }
 
@@ -1649,11 +1621,24 @@ class MobileApiHome(http.Controller):
     
     @http.route('/mobile/chat/list', type='json', auth='user', methods=['POST'], csrf=False)
     def chat_list(self, **kwargs):
-        partner = request.env.user.partner_id
+        data = request.get_json_data() or {}
 
-        members = request.env['discuss.channel.member'].sudo().search(
-            [('partner_id', '=', partner.id)],
-            order='last_interest_dt desc'
+        partner = request.env.user.partner_id
+        page = int(data.get('page', 1))
+        limit = int(data.get('limit', 20))
+        offset = (page - 1) * limit
+
+        Member = request.env['discuss.channel.member'].sudo()
+
+        domain = [('partner_id', '=', partner.id)]
+
+        total = Member.search_count(domain)
+
+        members = Member.search(
+            domain,
+            order='last_interest_dt desc',
+            limit=limit,
+            offset=offset
         )
 
         chats = []
@@ -1671,5 +1656,110 @@ class MobileApiHome(http.Controller):
 
         return {
             "status": 200,
+            "page": page,
+            "limit": limit,
+            "total_records": total,
+            "total_pages": (total + limit - 1) // limit,
             "chats": chats
         }
+
+    @http.route('/mobile/chat/mark_read', type='json', auth='user', methods=['POST'], csrf=False)
+    def mark_chat_read(self, **kwargs):
+        data = request.get_json_data() or {}
+        channel_id = data.get("channel_id")
+
+        if not channel_id:
+            return {"status": 400, "error": "channel_id required"}
+
+        partner = request.env.user.partner_id
+
+        member = request.env['discuss.channel.member'].sudo().search([
+            ('channel_id','=',int(channel_id)),
+            ('partner_id','=',partner.id)
+        ], limit=1)
+
+        if member:
+            member.sudo().write({
+                'message_unread_counter': 0,
+                'last_interest_dt': fields.Datetime.now()
+            })
+
+        notifications = request.env['mail.notification'].sudo().search([
+            ('res_partner_id','=',partner.id),
+            ('is_read','=',False)
+        ])
+
+        for n in notifications:
+            if n.mail_message_id.model == 'discuss.channel' and n.mail_message_id.res_id == int(channel_id):
+                n.sudo().write({'is_read': True})
+
+        request.env['bus.bus']._sendone(
+            partner,
+            'mail.record/insert',
+            {
+                'discuss.channel.member': [{
+                    'id': member.id,
+                    'message_unread_counter': 0,
+                    'thread': {'id': int(channel_id), 'model': 'discuss.channel'}
+                }]
+            }
+        )
+
+        return {
+            "status": 200,
+            "message": "Messages marked as read"
+        }
+
+    @http.route('/mobile/employees', type='json', auth='user', methods=['POST'], csrf=False)
+    def mobile_employees(self, **kwargs):
+
+        data = request.get_json_data() or {}
+
+        page = int(data.get("page", 1))
+        limit = int(data.get("limit", 20))
+        search = data.get("search", "")
+        offset = (page - 1) * limit
+
+        user = request.env.user
+
+        domain = [
+            ("active", "=", True),
+            ("user_id", "!=", user.id)
+        ]
+
+        if search:
+            domain += ["|",
+                ("name", "ilike", search),
+                ("work_email", "ilike", search)
+            ]
+
+        Employee = request.env["hr.employee"].sudo()
+
+        total = Employee.search_count(domain)
+
+        employees = Employee.search(
+            domain,
+            limit=limit,
+            offset=offset,
+            order="name asc"
+        )
+
+        result = []
+        for emp in employees:
+            result.append({
+                "employee_id": emp.id,
+                "name": emp.name,
+                "job_title": emp.job_title or "",
+                "email": emp.work_email or "",
+            })
+
+        return {
+            "status": 200,
+            "page": page,
+            "limit": limit,
+            "total_records": total,
+            "total_pages": (total + limit - 1) // limit,
+            "employees": result
+        }
+
+
