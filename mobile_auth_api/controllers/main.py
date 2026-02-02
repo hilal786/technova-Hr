@@ -11,6 +11,7 @@ import math
 import re
 import pytz
 from datetime import time
+from datetime import datetime
 from odoo.exceptions import ValidationError, UserError
 
 class MobileApiHome(http.Controller):
@@ -912,6 +913,7 @@ class MobileApiHome(http.Controller):
 
     @http.route('/mobile/attendance/check', type='json', auth='user', csrf=False)
     def mobile_attendance_check(self, **kwargs):
+        print("=== MOBILE ATTENDANCE API NEW VERSION LOADED ===")
 
         data = request.get_json_data() or {}
         action = data.get('action')
@@ -966,16 +968,16 @@ class MobileApiHome(http.Controller):
             ('employee_id', '=', employee.id),
             ('check_out', '=', False),
             ('is_break', '=', False),
-            ('check_in', '>=', today_start),
-            ('check_in', '<=', today_end),
+            # ('check_in', '>=', today_start),
+            # ('check_in', '<=', today_end),
         ], order='check_in desc', limit=1)
 
         open_break = Attendance.search([
             ('employee_id', '=', employee.id),
             ('check_out', '=', False),
             ('is_break', '=', True),
-            ('check_in', '>=', today_start),
-            ('check_in', '<=', today_end),
+            # ('check_in', '>=', today_start),
+            # ('check_in', '<=', today_end),
         ], order='check_in desc', limit=1)
 
         now = fields.Datetime.now()
@@ -1560,6 +1562,7 @@ class MobileApiHome(http.Controller):
 
     @http.route('/mobile/chat/messages', type='json', auth='user', methods=['POST'], csrf=False)
     def get_chat_messages(self, **kwargs):
+
         data = request.get_json_data() or {}
 
         channel_id = data.get('channel_id')
@@ -1570,9 +1573,19 @@ class MobileApiHome(http.Controller):
         if not channel_id:
             return {"status": 400, "error": "channel_id is required"}
 
+        channel = request.env['discuss.channel'].sudo().browse(int(channel_id))
+        partner = request.env.user.partner_id
+
+        request.env['mail.notification'].sudo().search([
+            ('res_partner_id', '=', partner.id),
+            ('mail_message_id.model', '=', 'discuss.channel'),
+            ('mail_message_id.res_id', '=', channel.id),
+            ('is_read', '=', False)
+        ]).write({'is_read': True})
+
         domain = [
             ('model', '=', 'discuss.channel'),
-            ('res_id', '=', int(channel_id)),
+            ('res_id', '=', channel.id),
         ]
 
         Message = request.env['mail.message'].sudo()
@@ -1621,30 +1634,28 @@ class MobileApiHome(http.Controller):
     
     @http.route('/mobile/chat/list', type='json', auth='user', methods=['POST'], csrf=False)
     def chat_list(self, **kwargs):
+
         data = request.get_json_data() or {}
 
         partner = request.env.user.partner_id
         page = int(data.get('page', 1))
         limit = int(data.get('limit', 20))
-        offset = (page - 1) * limit
 
         Member = request.env['discuss.channel.member'].sudo()
 
-        domain = [('partner_id', '=', partner.id)]
-
-        total = Member.search_count(domain)
-
-        members = Member.search(
-            domain,
-            order='last_interest_dt desc',
-            limit=limit,
-            offset=offset
-        )
+        members = Member.search([
+            ('partner_id', '=', partner.id)
+        ])
 
         chats = []
+
         for m in members:
             channel = m.channel_id
-            last_msg = channel.message_ids[:1]
+
+            last_msg = request.env['mail.message'].sudo().search([
+                ('model', '=', 'discuss.channel'),
+                ('res_id', '=', channel.id)
+            ], order='create_date desc', limit=1)
 
             chats.append({
                 "channel_id": channel.id,
@@ -1654,13 +1665,23 @@ class MobileApiHome(http.Controller):
                 "last_message_date": last_msg.create_date if last_msg else None,
             })
 
+        chats = sorted(
+            chats,
+            key=lambda x: x['last_message_date'] or datetime.min,
+            reverse=True
+        )
+
+        total = len(chats)
+        start = (page - 1) * limit
+        end = start + limit
+
         return {
             "status": 200,
             "page": page,
             "limit": limit,
             "total_records": total,
             "total_pages": (total + limit - 1) // limit,
-            "chats": chats
+            "chats": chats[start:end]
         }
 
     @http.route('/mobile/chat/mark_read', type='json', auth='user', methods=['POST'], csrf=False)
