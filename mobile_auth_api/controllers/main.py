@@ -480,7 +480,8 @@ class MobileApiHome(http.Controller):
     @http.route('/mobile/attendance/logs', type='json', auth='user', csrf=False)
     def mobile_attendance_log(self, **kwargs):
         user = request.env.user
-        user_tz = pytz.timezone(user.tz or 'UTC')
+        user_ctx = user.with_context(tz=user.tz)  # IMPORTANT FIX
+
         employee = request.env['hr.employee'].sudo().search(
             [('user_id', '=', user.id)], limit=1
         )
@@ -508,21 +509,27 @@ class MobileApiHome(http.Controller):
                 None
             )
             if first_work_att:
-                clock_in = fields.Datetime.context_timestamp(user, first_work_att.check_in).strftime("%I:%M:%S %p")
+                clock_in = fields.Datetime.context_timestamp(
+                    user_ctx, first_work_att.check_in
+                ).strftime("%I:%M:%S %p")
 
             break_checkins = [
                 att.check_in for att in attendances
                 if att.is_break and att.check_in
             ]
             if break_checkins:
-                break_start = fields.Datetime.context_timestamp(user, max(break_checkins)).strftime("%I:%M:%S %p")
+                break_start = fields.Datetime.context_timestamp(
+                    user_ctx, max(break_checkins)
+                ).strftime("%I:%M:%S %p")
 
             break_checkouts = [
                 att.check_out for att in attendances
                 if att.is_break and att.check_out
             ]
             if break_checkouts:
-                break_end = fields.Datetime.context_timestamp(user, max(break_checkouts)).strftime("%I:%M:%S %p")
+                break_end = fields.Datetime.context_timestamp(
+                    user_ctx, max(break_checkouts)
+                ).strftime("%I:%M:%S %p")
 
             open_work = Attendance.search([
                 ('employee_id', '=', employee.id),
@@ -536,7 +543,9 @@ class MobileApiHome(http.Controller):
             ]
 
             if work_checkouts and not open_work:
-                clock_out = fields.Datetime.context_timestamp(user, max(work_checkouts)).strftime("%I:%M:%S %p")
+                clock_out = fields.Datetime.context_timestamp(
+                    user_ctx, max(work_checkouts)
+                ).strftime("%I:%M:%S %p")
 
         last_checkedin_logs = None
 
@@ -549,10 +558,10 @@ class MobileApiHome(http.Controller):
         if last_open_attendance:
             last_checkedin_logs = {
                 "date": fields.Datetime.context_timestamp(
-                    user, last_open_attendance.check_in
+                    user_ctx, last_open_attendance.check_in
                 ).strftime("%d %b, %Y"),
                 "clock_in": fields.Datetime.context_timestamp(
-                    user, last_open_attendance.check_in
+                    user_ctx, last_open_attendance.check_in
                 ).strftime("%I:%M:%S %p"),
                 "break_start": None,
                 "break_end": None,
@@ -570,6 +579,7 @@ class MobileApiHome(http.Controller):
             },
             "last_checkedin_logs": last_checkedin_logs
         }
+
 
 
     @http.route('/mobile/payslip/dashboard', type='json', auth='user', csrf=False)
@@ -834,8 +844,14 @@ class MobileApiHome(http.Controller):
             result.append({
                 "id": event.id,
                 "name": event.name,
-                "start_datetime": event.date_begin.strftime('%Y-%m-%d %H:%M:%S') if event.date_begin else '',
-                "end_datetime": event.date_end.strftime('%Y-%m-%d %H:%M:%S') if event.date_end else '',
+                "start_datetime": fields.Datetime.context_timestamp(
+                        request.env.user.with_context(tz=request.env.user.tz),
+                        event.date_begin
+                    ).strftime('%Y-%m-%d %H:%M:%S') if event.date_begin else '',
+                "end_datetime": fields.Datetime.context_timestamp(
+                        request.env.user.with_context(tz=request.env.user.tz),
+                        event.date_end
+                    ).strftime('%Y-%m-%d %H:%M:%S') if event.date_end else '',
                 "location": event.address_id.name if event.address_id else '',
                 "seats_max": event.seats_max or 0,
                 "seats_available": event.seats_available or 0,
@@ -1432,11 +1448,13 @@ class MobileApiHome(http.Controller):
 
         if timezone:
             if timezone not in pytz.common_timezones:
-                return json.dumps({
+                return request.make_json_response({
                     "status": 400,
                     "message": "Invalid timezone"
                 })
+
             user.sudo().write({'tz': timezone})
+            request.session['tz'] = timezone
 
         if number:
             partner.sudo().write({'phone': number})
@@ -1449,11 +1467,11 @@ class MobileApiHome(http.Controller):
                 "image_1920": image_base64
             })
 
-        return json.dumps({
+        return request.make_json_response({
             "status": 200,
-            "message": "Profile updated successfully"
+            "message": "Profile updated successfully",
+            "timezone": user.tz
         })
-
 
 
     @http.route('/mobile/tasks/status', type='json', auth='user', methods=['POST'], csrf=False)
@@ -1605,7 +1623,11 @@ class MobileApiHome(http.Controller):
                 "message_id": msg.id,
                 "body": msg.body,
                 "author": msg.author_id.name,
-                "date": msg.create_date
+                "date": fields.Datetime.context_timestamp(
+                        request.env.user.with_context(tz=request.env.user.tz),
+                        msg.create_date
+                    ).strftime("%Y-%m-%d %H:%M:%S")
+
             })
 
         return {
@@ -1631,13 +1653,16 @@ class MobileApiHome(http.Controller):
             "status": 200,
             "unread_count": total
         }
-    
+
     @http.route('/mobile/chat/list', type='json', auth='user', methods=['POST'], csrf=False)
     def chat_list(self, **kwargs):
 
         data = request.get_json_data() or {}
 
-        partner = request.env.user.partner_id
+        user = request.env.user
+        user_ctx = user.with_context(tz=user.tz)
+
+        partner = user.partner_id
         page = int(data.get('page', 1))
         limit = int(data.get('limit', 20))
 
@@ -1652,24 +1677,46 @@ class MobileApiHome(http.Controller):
         for m in members:
             channel = m.channel_id
 
+            # Last message
             last_msg = request.env['mail.message'].sudo().search([
                 ('model', '=', 'discuss.channel'),
                 ('res_id', '=', channel.id)
             ], order='create_date desc', limit=1)
 
+            last_dt = None
+            if last_msg and last_msg.create_date:
+                last_dt = fields.Datetime.context_timestamp(
+                    user_ctx,
+                    last_msg.create_date
+                )
+
+            # ✅ CORRECT unread logic (Odoo style)
+            unread_count = request.env['mail.message'].sudo().search_count([
+                ('model', '=', 'discuss.channel'),
+                ('res_id', '=', channel.id),
+                ('create_date', '>', m.last_interest_dt or datetime.min),
+                ('author_id', '!=', partner.id)
+            ])
+
             chats.append({
                 "channel_id": channel.id,
                 "channel_name": channel.name,
-                "unread_count": m.message_unread_counter,
+                "unread_count": unread_count,
                 "last_message": last_msg.body if last_msg else "",
-                "last_message_date": last_msg.create_date if last_msg else None,
+                "last_message_date": last_dt,
             })
+
+        aware_min = datetime.min.replace(tzinfo=pytz.UTC)
 
         chats = sorted(
             chats,
-            key=lambda x: x['last_message_date'] or datetime.min,
+            key=lambda x: x['last_message_date'] or aware_min,
             reverse=True
         )
+
+        for chat in chats:
+            if chat["last_message_date"]:
+                chat["last_message_date"] = chat["last_message_date"].strftime("%Y-%m-%d %H:%M:%S")
 
         total = len(chats)
         start = (page - 1) * limit
@@ -1684,6 +1731,8 @@ class MobileApiHome(http.Controller):
             "chats": chats[start:end]
         }
 
+
+
     @http.route('/mobile/chat/mark_read', type='json', auth='user', methods=['POST'], csrf=False)
     def mark_chat_read(self, **kwargs):
         data = request.get_json_data() or {}
@@ -1695,25 +1744,19 @@ class MobileApiHome(http.Controller):
         partner = request.env.user.partner_id
 
         member = request.env['discuss.channel.member'].sudo().search([
-            ('channel_id','=',int(channel_id)),
-            ('partner_id','=',partner.id)
+            ('channel_id', '=', int(channel_id)),
+            ('partner_id', '=', partner.id)
         ], limit=1)
 
-        if member:
-            member.sudo().write({
-                'message_unread_counter': 0,
-                'last_interest_dt': fields.Datetime.now()
-            })
+        if not member:
+            return {"status": 404, "error": "Channel membership not found"}
 
-        notifications = request.env['mail.notification'].sudo().search([
-            ('res_partner_id','=',partner.id),
-            ('is_read','=',False)
-        ])
+        # ✅ Update read timestamp
+        member.sudo().write({
+            'last_interest_dt': fields.Datetime.now()
+        })
 
-        for n in notifications:
-            if n.mail_message_id.model == 'discuss.channel' and n.mail_message_id.res_id == int(channel_id):
-                n.sudo().write({'is_read': True})
-
+        # ✅ IMPORTANT: Notify Web Discuss via bus
         request.env['bus.bus']._sendone(
             partner,
             'mail.record/insert',
@@ -1721,7 +1764,10 @@ class MobileApiHome(http.Controller):
                 'discuss.channel.member': [{
                     'id': member.id,
                     'message_unread_counter': 0,
-                    'thread': {'id': int(channel_id), 'model': 'discuss.channel'}
+                    'thread': {
+                        'id': int(channel_id),
+                        'model': 'discuss.channel'
+                    }
                 }]
             }
         )
@@ -1730,6 +1776,8 @@ class MobileApiHome(http.Controller):
             "status": 200,
             "message": "Messages marked as read"
         }
+
+
 
     @http.route('/mobile/employees', type='json', auth='user', methods=['POST'], csrf=False)
     def mobile_employees(self, **kwargs):
