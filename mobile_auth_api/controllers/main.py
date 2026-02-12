@@ -1592,8 +1592,25 @@ class MobileApiHome(http.Controller):
             return {"status": 400, "error": "channel_id is required"}
 
         channel = request.env['discuss.channel'].sudo().browse(int(channel_id))
-        partner = request.env.user.partner_id
+        if not channel.exists():
+            return {"status": 404, "error": "Channel not found"}
 
+        user = request.env.user
+        partner = user.partner_id
+        user_ctx = user.with_context(tz=user.tz)
+
+        #Update channel member (THIS fixes unread logic properly)
+        member = request.env['discuss.channel.member'].sudo().search([
+            ('channel_id', '=', channel.id),
+            ('partner_id', '=', partner.id)
+        ], limit=1)
+
+        if member:
+            member.sudo().write({
+                'last_interest_dt': fields.Datetime.now()
+            })
+
+        #Mark notifications as read
         request.env['mail.notification'].sudo().search([
             ('res_partner_id', '=', partner.id),
             ('mail_message_id.model', '=', 'discuss.channel'),
@@ -1601,6 +1618,24 @@ class MobileApiHome(http.Controller):
             ('is_read', '=', False)
         ]).write({'is_read': True})
 
+        #Push bus update so UI refreshes unread counter
+        if member:
+            request.env['bus.bus']._sendone(
+                partner,
+                'mail.record/insert',
+                {
+                    'discuss.channel.member': [{
+                        'id': member.id,
+                        'message_unread_counter': 0,
+                        'thread': {
+                            'id': channel.id,
+                            'model': 'discuss.channel'
+                        }
+                    }]
+                }
+            )
+
+        #Fetch messages
         domain = [
             ('model', '=', 'discuss.channel'),
             ('res_id', '=', channel.id),
@@ -1624,10 +1659,9 @@ class MobileApiHome(http.Controller):
                 "body": msg.body,
                 "author": msg.author_id.name,
                 "date": fields.Datetime.context_timestamp(
-                        request.env.user.with_context(tz=request.env.user.tz),
-                        msg.create_date
-                    ).strftime("%Y-%m-%d %H:%M:%S")
-
+                    user_ctx,
+                    msg.create_date
+                ).strftime("%Y-%m-%d %H:%M:%S")
             })
 
         return {
@@ -1638,6 +1672,7 @@ class MobileApiHome(http.Controller):
             "total_pages": (total + limit - 1) // limit,
             "messages": list(reversed(result))
         }
+
 
     @http.route('/mobile/chat/unread_count', type='json', auth='user', methods=['POST'], csrf=False)
     def unread_count(self, **kwargs):
@@ -1690,7 +1725,6 @@ class MobileApiHome(http.Controller):
                     last_msg.create_date
                 )
 
-            # ✅ CORRECT unread logic (Odoo style)
             unread_count = request.env['mail.message'].sudo().search_count([
                 ('model', '=', 'discuss.channel'),
                 ('res_id', '=', channel.id),
@@ -1751,12 +1785,10 @@ class MobileApiHome(http.Controller):
         if not member:
             return {"status": 404, "error": "Channel membership not found"}
 
-        # ✅ Update read timestamp
         member.sudo().write({
             'last_interest_dt': fields.Datetime.now()
         })
 
-        # ✅ IMPORTANT: Notify Web Discuss via bus
         request.env['bus.bus']._sendone(
             partner,
             'mail.record/insert',
