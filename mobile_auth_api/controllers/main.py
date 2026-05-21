@@ -159,36 +159,105 @@ class MobileApiHome(http.Controller):
         )
         return product
 
-    @http.route('/mobile/expenses', type='json', auth='user', methods=['POST'], csrf=False)
-    def create_expense(self, **post):
+    @http.route('/mobile/expenses', type='http', auth='user', methods=['POST'], csrf=False)
+    def create_expense(self, **kwargs):
+
         user = request.env.user
-        employee = request.env['hr.employee'].sudo().search([('user_id', '=', user.id)], limit=1)
+
+        employee = request.env['hr.employee'].sudo().search(
+            [('user_id', '=', user.id)],
+            limit=1
+        )
+
         if not employee:
-            return {"status": 400, "error": "No employee linked to this user"}
+            return request.make_json_response({
+                "status": 400,
+                "error": "No employee linked to this user"
+            })
 
-        data = request.get_json_data()
-        description = data.get('reason')
-        date = data.get('date')
-        amount = data.get('amount') or 10
+        reason = kwargs.get('reason')
+        date = kwargs.get('date')
+        amount = kwargs.get('amount') or 0
+        product_id = kwargs.get('product_id')
 
-        # description = post.get("description")
-        # amount = post.get("amount") or 10
-        product_id = post.get("product_id") or self._get_default_expense_product().id
+        if not reason or not date:
+            return request.make_json_response({
+                "status": 400,
+                "error": "reason and date are required"
+            })
 
-        if not description or not date:
-            return {"status": 400, "error": "Missing required fields: description or date"}
+        if not product_id:
+            product = self._get_default_expense_product()
+            product_id = product.id if product else False
+
+        if not product_id:
+            return request.make_json_response({
+                "status": 400,
+                "error": "No expense product found"
+            })
 
         expense = request.env['hr.expense'].sudo().create({
-            'name': description,
+            'name': reason,
             'employee_id': employee.id,
-            'product_id': product_id,
+            'product_id': int(product_id),
             'total_amount': float(amount),
             'date': date,
             'quantity': 1.0,
             'payment_mode': 'own_account',
         })
 
-        return {"status": 200, "message": "Expense created", "expense_id": expense.id}
+        uploaded_file = request.httprequest.files.get('attachment')
+
+        attachment_uploaded = False
+        attachment_name = False
+
+        if uploaded_file:
+
+            allowed_types = [
+                'image/jpeg',
+                'image/png',
+                'application/pdf'
+            ]
+
+            if uploaded_file.content_type not in allowed_types:
+                return request.make_json_response({
+                    "status": 400,
+                    "error": "Only JPG, PNG and PDF files are allowed"
+                })
+
+            uploaded_file.seek(0, 2)
+            file_size = uploaded_file.tell()
+            uploaded_file.seek(0)
+
+            max_size = 10 * 1024 * 1024  # 10 MB
+
+            if file_size > max_size:
+                return request.make_json_response({
+                    "status": 400,
+                    "error": "File size exceeds 10 MB limit"
+                })
+
+            file_content = uploaded_file.read()
+
+            request.env['ir.attachment'].sudo().create({
+                'name': uploaded_file.filename,
+                'datas': base64.b64encode(file_content),
+                'res_model': 'hr.expense',
+                'res_id': expense.id,
+                'mimetype': uploaded_file.content_type,
+                'type': 'binary',
+            })
+
+            attachment_uploaded = True
+            attachment_name = uploaded_file.filename
+
+        return request.make_json_response({
+            "status": 200,
+            "message": "Expense created successfully",
+            "expense_id": expense.id,
+            "attachment_uploaded": attachment_uploaded,
+            "attachment_name": attachment_name
+        })
 
     @http.route('/mobile/expenses/list', type='json', auth='user', methods=['POST'], csrf=False)
     def list_expenses(self, **kwargs):
@@ -220,14 +289,45 @@ class MobileApiHome(http.Controller):
 
         result = []
         for exp in expenses:
+            attachments = request.env['ir.attachment'].sudo().search([
+                ('res_model', '=', 'hr.expense'),
+                ('res_id', '=', exp.id)
+            ], limit=1)
+
+            attachment_data = {}
+
+            base_url = request.env['ir.config_parameter'].sudo().get_param('web.base.url')
+
+            if attachments:
+                attachment_data = {
+                    "attachment_id": attachments.id,
+                    "attachment_name": attachments.name,
+                    "attachment_mimetype": attachments.mimetype,
+                    "preview_url": f"{base_url}/web/content/{attachments.id}",
+                    "download_url": f"{base_url}/web/content/{attachments.id}?download=true",
+                }
+
             result.append({
                 'id': exp.id,
                 'name': exp.name,
                 'amount': exp.total_amount,
                 'state': exp.state,
                 'date': str(exp.date),
-            })
 
+                'employee': exp.employee_id.name,
+                'category': exp.product_id.categ_id.name if exp.product_id.categ_id else "",
+                'product': exp.product_id.name,
+
+                'payment_mode': dict(
+                    exp._fields['payment_mode'].selection
+                ).get(exp.payment_mode),
+
+                'company': exp.company_id.name if exp.company_id else "",
+
+                'has_attachment': bool(attachments),
+
+                'attachment': attachment_data
+            })
         return {
             "status": 200,
             "page": page,
@@ -326,60 +426,206 @@ class MobileApiHome(http.Controller):
     def create_leave(self, **kwargs):
 
         user = request.env.user
+
         employee = request.env['hr.employee'].sudo().search(
-            [('user_id', '=', user.id)], limit=1
+            [('user_id', '=', user.id)],
+            limit=1
         )
+
         if not employee:
-            return {"status": 400, "error": "No employee linked to this user"}
+            return {
+                "status": 400,
+                "error": "No employee linked to this user"
+            }
 
         data = request.get_json_data() or {}
+
         leave_type_id = data.get('leave_type_id')
         date_from = data.get('date_from')
         date_to = data.get('date_to')
         reason = data.get('reason')
 
         if not all([leave_type_id, date_from, date_to, reason]):
-            return {"status": 400, "error": "Missing required fields"}
-
-        existing_leave = request.env['hr.leave'].sudo().search([
-            ('employee_id', '=', employee.id),
-            ('state', '!=', 'cancel'),
-            ('request_date_from', '<=', date_to),
-            ('request_date_to', '>=', date_from),
-        ], limit=1)
-
-        if existing_leave:
             return {
                 "status": 400,
-                "error": (
-                    f"Leave already exists from "
-                    f"{existing_leave.request_date_from} to "
-                    f"{existing_leave.request_date_to}"
-                )
+                "error": "Missing required fields"
             }
 
         try:
-            leave = request.env['hr.leave'].sudo().create({
-                'name': reason,
-                'employee_id': employee.id,
-                'holiday_status_id': int(leave_type_id),
-                'request_date_from': date_from,
-                'request_date_to': date_to,
-            })
+
+            leave_type = request.env['hr.leave.type'].sudo().browse(
+                int(leave_type_id)
+            )
+
+            if not leave_type.exists():
+                return {
+                    "status": 400,
+                    "error": "Invalid leave type"
+                }
+
+            # =====================================================
+            # FULL DAY LEAVE
+            # =====================================================
+
+            if leave_type.request_unit == 'day':
+
+                request_date_from = fields.Date.to_date(date_from)
+                request_date_to = fields.Date.to_date(date_to)
+
+                if request_date_to < request_date_from:
+                    return {
+                        "status": 400,
+                        "error": "date_to must be greater than or equal to date_from"
+                    }
+
+                # =====================================================
+                # CHECK LEAVE BALANCE
+                # =====================================================
+
+                if leave_type.requires_allocation == 'yes':
+
+                    remaining_leaves = leave_type.with_context(
+                        employee_id=employee.id
+                    ).virtual_remaining_leaves
+
+                    requested_days = (
+                        request_date_to - request_date_from
+                    ).days + 1
+
+                    if remaining_leaves < requested_days:
+                        return {
+                            "status": 400,
+                            "error": (
+                                f"Insufficient leave balance. "
+                                f"Available: {remaining_leaves} days"
+                            )
+                        }
+
+                # =====================================================
+                # CHECK OVERLAPPING LEAVES
+                # =====================================================
+
+                existing_leave = request.env['hr.leave'].sudo().search([
+                    ('employee_id', '=', employee.id),
+                    ('state', '!=', 'cancel'),
+                    ('request_date_from', '<=', request_date_to),
+                    ('request_date_to', '>=', request_date_from),
+                ], limit=1)
+
+                if existing_leave:
+                    return {
+                        "status": 400,
+                        "error": (
+                            f"Leave already exists from "
+                            f"{existing_leave.request_date_from} to "
+                            f"{existing_leave.request_date_to}"
+                        )
+                    }
+
+                # =====================================================
+                # CREATE FULL DAY LEAVE
+                # =====================================================
+
+                leave = request.env['hr.leave'].sudo().create({
+                    'name': reason,
+                    'employee_id': employee.id,
+                    'holiday_status_id': int(leave_type_id),
+
+                    'request_date_from': request_date_from,
+                    'request_date_to': request_date_to,
+                })
+
+            # =====================================================
+            # HOURLY LEAVE
+            # =====================================================
+
+            else:
+
+                date_from_dt = fields.Datetime.to_datetime(date_from)
+                date_to_dt = fields.Datetime.to_datetime(date_to)
+
+                if date_to_dt <= date_from_dt:
+                    return {
+                        "status": 400,
+                        "error": "date_to must be greater than date_from"
+                    }
+
+                # =====================================================
+                # CHECK OVERLAPPING HOURLY LEAVES
+                # =====================================================
+
+                existing_leave = request.env['hr.leave'].sudo().search([
+                    ('employee_id', '=', employee.id),
+                    ('state', '!=', 'cancel'),
+                    ('date_from', '<=', date_to_dt),
+                    ('date_to', '>=', date_from_dt),
+                ], limit=1)
+
+                if existing_leave:
+                    return {
+                        "status": 400,
+                        "error": (
+                            f"Leave already exists from "
+                            f"{existing_leave.date_from} to "
+                            f"{existing_leave.date_to}"
+                        )
+                    }
+
+                # =====================================================
+                # CREATE HOURLY LEAVE
+                # =====================================================
+
+                leave = request.env['hr.leave'].sudo().create({
+                    'name': reason,
+                    'employee_id': employee.id,
+                    'holiday_status_id': int(leave_type_id),
+
+                    'date_from': date_from_dt,
+                    'date_to': date_to_dt,
+
+                    'request_date_from': date_from_dt.date(),
+                    'request_date_to': date_to_dt.date(),
+
+                    'request_unit_hours': True,
+
+                    'request_hour_from': (
+                        date_from_dt.hour +
+                        (date_from_dt.minute / 60.0)
+                    ),
+
+                    'request_hour_to': (
+                        date_to_dt.hour +
+                        (date_to_dt.minute / 60.0)
+                    ),
+                })
+
+            # =====================================================
+            # SUCCESS RESPONSE
+            # =====================================================
 
             return {
                 "status": 200,
-                "message": "Leave request submitted",
-                "leave_id": leave.id
+                "message": "Leave request submitted successfully",
+                "leave_id": leave.id,
+                "leave_type_id": leave.holiday_status_id.id,
+                "leave_type": leave.holiday_status_id.name,
+                "date_from": str(leave.date_from),
+                "date_to": str(leave.date_to),
+                "number_of_days": leave.number_of_days,
+                "state": leave.state,
             }
 
         except (ValidationError, UserError) as e:
             return {
                 "status": 400,
-                "error": e.args[0]
+                "error": str(e)
             }
 
-
+        except Exception as e:
+            return {
+                "status": 500,
+                "error": str(e)
+            }
     @http.route('/mobile/employee/profile', type='json', auth='user', csrf=False)
     def employee_profile(self, **kwargs):
         user = request.env.user
@@ -477,10 +723,24 @@ class MobileApiHome(http.Controller):
             'image_1920': employee.image_1920 or "" ,
         }
 
+    def _format_duration(self, total_seconds):
+        total_seconds = int(total_seconds)
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
+        if hours > 0:
+            return f"{hours}h {minutes}m {seconds}s"
+        elif minutes > 0:
+            return f"{minutes}m {seconds}s"
+        else:
+            return f"{seconds}s"
+
     @http.route('/mobile/attendance/logs', type='json', auth='user', csrf=False)
     def mobile_attendance_log(self, **kwargs):
         user = request.env.user
-        user_ctx = user.with_context(tz=user.tz)  # IMPORTANT FIX
+        user_ctx = user.with_context(tz=user.tz)
+        tz_name = user.tz or 'UTC'
+        user_tz = pytz.timezone(tz_name)
 
         employee = request.env['hr.employee'].sudo().search(
             [('user_id', '=', user.id)], limit=1
@@ -489,97 +749,164 @@ class MobileApiHome(http.Controller):
             return {"status": 400, "error": "Employee not found for user."}
 
         today_start, today_end, today_user = self._get_user_day_range_utc()
-
         Attendance = request.env['hr.attendance'].sudo()
 
+        # All today's attendance records
         attendances = Attendance.search([
             ('employee_id', '=', employee.id),
             ('check_in', '>=', today_start),
             ('check_in', '<=', today_end)
         ], order='check_in asc')
 
-        clock_in = None
-        clock_out = None
-        break_start = None
-        break_end = None
-
-        if attendances:
-            first_work_att = next(
-                (att for att in attendances if not att.is_break and att.check_in),
-                None
-            )
-            if first_work_att:
-                clock_in = fields.Datetime.context_timestamp(
-                    user_ctx, first_work_att.check_in
-                ).strftime("%I:%M:%S %p")
-
-            break_checkins = [
-                att.check_in for att in attendances
-                if att.is_break and att.check_in
-            ]
-            if break_checkins:
-                break_start = fields.Datetime.context_timestamp(
-                    user_ctx, max(break_checkins)
-                ).strftime("%I:%M:%S %p")
-
-            break_checkouts = [
-                att.check_out for att in attendances
-                if att.is_break and att.check_out
-            ]
-            if break_checkouts:
-                break_end = fields.Datetime.context_timestamp(
-                    user_ctx, max(break_checkouts)
-                ).strftime("%I:%M:%S %p")
-
-            open_work = Attendance.search([
-                ('employee_id', '=', employee.id),
-                ('check_out', '=', False),
-                ('is_break', '=', False)
-            ], limit=1)
-
-            work_checkouts = [
-                att.check_out for att in attendances
-                if not att.is_break and att.check_out
-            ]
-
-            if work_checkouts and not open_work:
-                clock_out = fields.Datetime.context_timestamp(
-                    user_ctx, max(work_checkouts)
-                ).strftime("%I:%M:%S %p")
-
-        last_checkedin_logs = None
-
-        last_open_attendance = Attendance.search([
+        # --- Current open sessions ---
+        open_work = Attendance.search([
             ('employee_id', '=', employee.id),
             ('check_out', '=', False),
             ('is_break', '=', False)
         ], order='check_in desc', limit=1)
 
-        if last_open_attendance:
-            last_checkedin_logs = {
-                "date": fields.Datetime.context_timestamp(
-                    user_ctx, last_open_attendance.check_in
-                ).strftime("%d %b, %Y"),
-                "clock_in": fields.Datetime.context_timestamp(
-                    user_ctx, last_open_attendance.check_in
-                ).strftime("%I:%M:%S %p"),
-                "break_start": None,
-                "break_end": None,
-                "clock_out": None
+        open_break = Attendance.search([
+            ('employee_id', '=', employee.id),
+            ('check_out', '=', False),
+            ('is_break', '=', True)
+        ], order='check_in desc', limit=1)
+
+        # --- Determine current status ---
+        if open_break:
+            current_status = 'on_break'
+        elif open_work:
+            current_status = 'checked_in'
+        else:
+            any_work_today = any(not a.is_break for a in attendances)
+            current_status = 'checked_out' if any_work_today else 'not_checked_in'
+
+        # --- Calculate total worked seconds (completed sessions only) ---
+        total_worked_seconds = 0
+        for att in attendances:
+            if not att.is_break and att.check_out:
+                delta = (att.check_out - att.check_in).total_seconds()
+                total_worked_seconds += max(delta, 0)
+
+        # --- Calculate total break seconds (completed sessions only) ---
+        total_break_seconds = 0
+        for att in attendances:
+            if att.is_break and att.check_out:
+                delta = (att.check_out - att.check_in).total_seconds()
+                total_break_seconds += max(delta, 0)
+
+        # --- ISO timestamps for mobile real-time timers ---
+        check_in_iso = None
+        break_start_iso = None
+
+        if open_work:
+            check_in_iso = fields.Datetime.context_timestamp(
+                user_ctx, open_work.check_in
+            ).isoformat()
+
+        if open_break:
+            break_start_iso = fields.Datetime.context_timestamp(
+                user_ctx, open_break.check_in
+            ).isoformat()
+
+        # --- Human-readable time logs ---
+        clock_in_display = None
+        clock_out_display = None
+        break_start_display = None
+        break_end_display = None
+
+        work_sessions = [a for a in attendances if not a.is_break]
+        break_sessions = [a for a in attendances if a.is_break]
+
+        if work_sessions:
+            first_work = work_sessions[0]
+            clock_in_display = fields.Datetime.context_timestamp(
+                user_ctx, first_work.check_in
+            ).strftime("%I:%M:%S %p")
+
+            # Only show clock_out when truly checked out for the day
+            if current_status == 'checked_out':
+                closed_work = [a for a in work_sessions if a.check_out]
+                if closed_work:
+                    clock_out_display = fields.Datetime.context_timestamp(
+                        user_ctx, max(a.check_out for a in closed_work)
+                    ).strftime("%I:%M:%S %p")
+
+        if break_sessions:
+            latest_break = max(break_sessions, key=lambda a: a.check_in)
+            break_start_display = fields.Datetime.context_timestamp(
+                user_ctx, latest_break.check_in
+            ).strftime("%I:%M:%S %p")
+
+            if latest_break.check_out:
+                break_end_display = fields.Datetime.context_timestamp(
+                    user_ctx, latest_break.check_out
+                ).strftime("%I:%M:%S %p")
+
+        # --- Office location ---
+        office_info = {}
+        if employee.office_latitude and employee.office_longitude:
+            office_info = {
+                "latitude": employee.office_latitude,
+                "longitude": employee.office_longitude,
+                "allowed_radius_m": employee.allowed_radius_m or 100
             }
+
+        # --- Details card ---
+        work_sessions_count = len(work_sessions)
+        break_sessions_count = len(break_sessions)
+
+        # Expected hours from employee work schedule
+        expected_seconds = 0
+        if employee.resource_calendar_id:
+            today_weekday = str(today_user.weekday())
+            day_lines = employee.resource_calendar_id.attendance_ids.filtered(
+                lambda l: l.dayofweek == today_weekday
+            )
+            expected_seconds = sum(
+                (l.hour_to - l.hour_from) * 3600 for l in day_lines
+            )
+
+        # Status label
+        status_label_map = {
+            'not_checked_in': 'Not Checked In',
+            'checked_in': 'Working',
+            'on_break': 'On Break',
+            'checked_out': 'Completed',
+        }
+        status_label = status_label_map.get(current_status, 'Unknown')
+
+        details_card = {
+            "date": today_user.strftime("%d %b, %Y"),
+            "day": today_user.strftime("%A"),
+            "status_label": status_label,
+            "check_in_time": clock_in_display,
+            "check_out_time": clock_out_display,
+            "break_start_time": break_start_display,
+            "break_end_time": break_end_display,
+            "worked_display": self._format_duration(total_worked_seconds),
+            "break_display": self._format_duration(total_break_seconds),
+            "expected_display": self._format_duration(expected_seconds),
+            "work_sessions": work_sessions_count,
+            "break_count": break_sessions_count,
+        }
 
         return {
             "status": 200,
             "date": today_user.strftime("%d %b, %Y"),
+            "current_status": current_status,
+            "check_in_iso": check_in_iso,
+            "break_start_iso": break_start_iso,
+            "total_worked_seconds": int(total_worked_seconds),
+            "total_break_seconds": int(total_break_seconds),
             "time_logs": {
-                "clock_in": clock_in,
-                "break_start": break_start,
-                "break_end": break_end,
-                "clock_out": clock_out
+                "clock_in": clock_in_display,
+                "break_start": break_start_display,
+                "break_end": break_end_display,
+                "clock_out": clock_out_display
             },
-            "last_checkedin_logs": last_checkedin_logs
+            "office_location": office_info,
+            "details_card": details_card,
         }
-
 
 
     @http.route('/mobile/payslip/dashboard', type='json', auth='user', csrf=False)
@@ -929,37 +1256,27 @@ class MobileApiHome(http.Controller):
 
     @http.route('/mobile/attendance/check', type='json', auth='user', csrf=False)
     def mobile_attendance_check(self, **kwargs):
-        print("=== MOBILE ATTENDANCE API NEW VERSION LOADED ===")
-
         data = request.get_json_data() or {}
         action = data.get('action')
         lat = data.get('latitude')
         lon = data.get('longitude')
 
-        if action not in ('check_in', 'check_out', 'break_in', 'break_out'):
-            return {
-                "success": False,
-                "message": "Invalid action"
-            }
+        if action not in ('check_in', 'check_out', 'break_start', 'break_end'):
+            return {"success": False, "message": "Invalid action"}
 
         if lat is None or lon is None:
             return {
                 "success": False,
-                "message": "Latitude and longitude are required"
+                "message": "Location access is required to use attendance.",
+                "error_code": "LOCATION_MISSING"
             }
 
         user = request.env.user
         employee = request.env['hr.employee'].sudo().search(
             [('user_id', '=', user.id)], limit=1
         )
-
         if not employee:
-            return {
-                "success": False,
-                "message": "Employee not linked with user"
-            }
-        
-        today_start, today_end, today_user = self._get_user_day_range_utc()
+            return {"success": False, "message": "Employee not linked with user"}
 
         office_lat = employee.office_latitude
         office_lon = employee.office_longitude
@@ -968,43 +1285,56 @@ class MobileApiHome(http.Controller):
         if not office_lat or not office_lon:
             return {
                 "success": False,
-                "message": "Office location not configured"
+                "message": "Your office location has not been configured. Please contact HR.",
+                "error_code": "OFFICE_LOCATION_NOT_SET"
             }
 
         distance = self._distance_in_meters(lat, lon, office_lat, office_lon)
+
+        # ✅ Always return location context in every response (success or fail)
+        location_context = {
+            "user_location": {"latitude": lat, "longitude": lon},
+            "office_location": {"latitude": office_lat, "longitude": office_lon},
+            "distance_meters": int(distance),
+            "allowed_radius_meters": allowed_radius,
+            "is_within_range": distance <= allowed_radius
+        }
+
         if distance > allowed_radius:
+            over_by = int(distance - allowed_radius)
             return {
                 "success": False,
-                "message": f"You are {int(distance)} meters away. Allowed radius is {allowed_radius} meters."
+                "message": f"You are {int(distance)}m from the office. Please move {over_by}m closer (allowed radius: {allowed_radius}m).",
+                "error_code": "OUT_OF_RANGE",
+                "location": location_context
             }
 
+        today_start, today_end, today_user = self._get_user_day_range_utc()
         Attendance = request.env['hr.attendance'].sudo()
+        now = fields.Datetime.now()
 
         open_work = Attendance.search([
             ('employee_id', '=', employee.id),
             ('check_out', '=', False),
             ('is_break', '=', False),
-            # ('check_in', '>=', today_start),
-            # ('check_in', '<=', today_end),
         ], order='check_in desc', limit=1)
 
         open_break = Attendance.search([
             ('employee_id', '=', employee.id),
             ('check_out', '=', False),
             ('is_break', '=', True),
-            # ('check_in', '>=', today_start),
-            # ('check_in', '<=', today_end),
         ], order='check_in desc', limit=1)
 
-        now = fields.Datetime.now()
+        user_ctx = user.with_context(tz=user.tz)
 
         if action == 'check_in':
             if open_work or open_break:
                 return {
                     "success": False,
-                    "message": "Already checked in"
+                    "message": "You are already checked in.",
+                    "error_code": "ALREADY_CHECKED_IN",
+                    "location": location_context
                 }
-
             rec = Attendance.create({
                 'employee_id': employee.id,
                 'check_in': now,
@@ -1012,57 +1342,80 @@ class MobileApiHome(http.Controller):
                 'in_longitude': lon,
                 'is_break': False
             })
-
+            check_in_iso = fields.Datetime.context_timestamp(
+                user_ctx, rec.check_in
+            ).isoformat()
             return {
                 "success": True,
-                "message": "Checked in successfully",
-                "attendance_id": rec.id
+                "message": "Checked in successfully. Have a productive day!",
+                "attendance_id": rec.id,
+                "check_in_iso": check_in_iso,
+                "current_status": "checked_in",
+                "location": location_context
             }
 
         if action == 'check_out':
             if open_break:
                 return {
                     "success": False,
-                    "message": "End break before checking out"
+                    "message": "Please end your break before checking out.",
+                    "error_code": "ON_BREAK",
+                    "location": location_context
                 }
-
             if not open_work:
                 return {
                     "success": False,
-                    "message": "No active work session found"
+                    "message": "No active work session found. Please check in first.",
+                    "error_code": "NOT_CHECKED_IN",
+                    "location": location_context
                 }
-
             open_work.write({
                 'check_out': now,
                 'out_latitude': lat,
                 'out_longitude': lon
             })
-
+            # Calculate total worked seconds for today
+            attendances_today = Attendance.search([
+                ('employee_id', '=', employee.id),
+                ('check_in', '>=', today_start),
+                ('check_in', '<=', today_end),
+                ('is_break', '=', False),
+            ])
+            total_seconds = sum(
+                (a.check_out - a.check_in).total_seconds()
+                for a in attendances_today if a.check_out
+            )
+            hours = int(total_seconds // 3600)
+            minutes = int((total_seconds % 3600) // 60)
             return {
                 "success": True,
-                "message": "Checked out successfully",
-                "attendance_id": open_work.id
+                "message": f"Checked out successfully. Total worked: {hours}h {minutes}m.",
+                "attendance_id": open_work.id,
+                "total_worked_seconds": int(total_seconds),
+                "current_status": "checked_out",
+                "location": location_context
             }
 
-        if action == 'break_in':
+        if action == 'break_start':
             if not open_work:
                 return {
                     "success": False,
-                    "message": "Check in before starting break"
+                    "message": "You must be checked in to start a break.",
+                    "error_code": "NOT_CHECKED_IN",
+                    "location": location_context
                 }
-
             if open_break:
                 return {
                     "success": False,
-                    "message": "Already on break"
+                    "message": "You are already on a break.",
+                    "error_code": "ALREADY_ON_BREAK",
+                    "location": location_context
                 }
-
             open_work.write({
                 'check_out': now,
                 'out_latitude': lat,
                 'out_longitude': lon
             })
-
             break_rec = Attendance.create({
                 'employee_id': employee.id,
                 'check_in': now,
@@ -1070,26 +1423,32 @@ class MobileApiHome(http.Controller):
                 'in_longitude': lon,
                 'is_break': True
             })
-
+            break_start_iso = fields.Datetime.context_timestamp(
+                user_ctx, break_rec.check_in
+            ).isoformat()
             return {
                 "success": True,
-                "message": "Break started",
-                "attendance_id": break_rec.id
+                "message": "Break started. Enjoy your break!",
+                "attendance_id": break_rec.id,
+                "break_start_iso": break_start_iso,
+                "current_status": "on_break",
+                "location": location_context
             }
 
-        if action == 'break_out':
+        if action == 'break_end':
             if not open_break:
                 return {
                     "success": False,
-                    "message": "No active break found"
+                    "message": "No active break found.",
+                    "error_code": "NOT_ON_BREAK",
+                    "location": location_context
                 }
-
             open_break.write({
                 'check_out': now,
                 'out_latitude': lat,
                 'out_longitude': lon
             })
-
+            break_duration = int((now - open_break.check_in).total_seconds())
             work_rec = Attendance.create({
                 'employee_id': employee.id,
                 'check_in': now,
@@ -1097,14 +1456,18 @@ class MobileApiHome(http.Controller):
                 'in_longitude': lon,
                 'is_break': False
             })
-
+            check_in_iso = fields.Datetime.context_timestamp(
+                user_ctx, work_rec.check_in
+            ).isoformat()
             return {
                 "success": True,
-                "message": "Break ended, work resumed",
-                "attendance_id": work_rec.id
+                "message": "Welcome back! Work session resumed.",
+                "attendance_id": work_rec.id,
+                "break_duration_seconds": break_duration,
+                "check_in_iso": check_in_iso,
+                "current_status": "checked_in",
+                "location": location_context
             }
-
-
     def _distance_in_meters(self, lat1, lon1, lat2, lon2):
         R = 6371000
         phi1 = math.radians(lat1)
@@ -1118,7 +1481,6 @@ class MobileApiHome(http.Controller):
             * math.sin(dlambda / 2) ** 2
         )
         return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-
 
 
     @http.route('/mobile/logout', type='json', auth='user', methods=['POST'], csrf=False)
@@ -1193,6 +1555,98 @@ class MobileApiHome(http.Controller):
             "content_type": attachment.mimetype or "application/octet-stream",
             "base64_file": file_base64,
         }
+
+    @http.route('/mobile/document/upload',type='http',auth='user',methods=['POST'],csrf=False)
+    def upload_employee_document(self, **kwargs):
+
+        user = request.env.user
+
+        employee = request.env['hr.employee'].sudo().search(
+            [('user_id', '=', user.id)],
+            limit=1
+        )
+
+        if not employee:
+            return request.make_json_response({
+                "status": 400,
+                "error": "No employee found"
+            })
+
+        document_id = kwargs.get('document_id')
+        document_number = kwargs.get('document_number')
+        issue_date = kwargs.get('issue_date')
+        expiry_date = kwargs.get('expiry_date')
+        description = kwargs.get('description')
+
+        uploaded_file = request.httprequest.files.get('attachment')
+
+        if not document_id:
+            return request.make_json_response({
+                "status": 400,
+                "error": "document_id is required"
+            })
+
+        if not uploaded_file:
+            return request.make_json_response({
+                "status": 400,
+                "error": "attachment is required"
+            })
+
+        allowed_types = [
+            'image/jpeg',
+            'image/png',
+            'application/pdf'
+        ]
+
+        if uploaded_file.content_type not in allowed_types:
+            return request.make_json_response({
+                "status": 400,
+                "error": "Only JPG, PNG and PDF files are allowed"
+            })
+
+        uploaded_file.seek(0, 2)
+        file_size = uploaded_file.tell()
+        uploaded_file.seek(0)
+
+        max_size = 10 * 1024 * 1024
+
+        if file_size > max_size:
+            return request.make_json_response({
+                "status": 400,
+                "error": "File size exceeds 10 MB limit"
+            })
+
+        document = request.env['hr.employee.document'].sudo().create({
+            'employee_id': employee.id,
+            'document_id': int(document_id),
+            'name': document_number,
+            'issue_date': issue_date or False,
+            'expiry_date': expiry_date or False,
+            'description': description or '',
+        })
+
+        file_content = uploaded_file.read()
+
+        attachment = request.env['ir.attachment'].sudo().create({
+            'name': uploaded_file.filename,
+            'datas': base64.b64encode(file_content),
+            'res_model': 'hr.employee.document',
+            'res_id': document.id,
+            'mimetype': uploaded_file.content_type,
+            'type': 'binary',
+        })
+
+        document.write({
+            'doc_attachment_ids': [(4, attachment.id)]
+        })
+
+        return request.make_json_response({
+            "status": 200,
+            "message": "Document uploaded successfully",
+            "document_id": document.id,
+            "attachment_id": attachment.id,
+            "file_name": attachment.name
+        })
     
     @http.route('/mobile/tasks', type='json', auth='user', methods=['POST'], csrf=False)
     def mobile_task_list(self, **kwargs):
@@ -1298,10 +1752,14 @@ class MobileApiHome(http.Controller):
 
     @http.route('/mobile/calendar', type='json', auth='user', csrf=False)
     def mobile_calendar(self, **kwargs):
+
         data = request.get_json_data() or {}
 
         start_date = data.get('start_date')
         end_date = data.get('end_date')
+
+        # NEW
+        category = data.get('category')
 
         if not start_date or not end_date:
             return {
@@ -1310,8 +1768,10 @@ class MobileApiHome(http.Controller):
             }
 
         user = request.env.user
+
         employee = request.env['hr.employee'].sudo().search(
-            [('user_id', '=', user.id)], limit=1
+            [('user_id', '=', user.id)],
+            limit=1
         )
 
         if not employee:
@@ -1323,10 +1783,17 @@ class MobileApiHome(http.Controller):
         user_tz = pytz.timezone(user.tz or 'UTC')
 
         start_user = user_tz.localize(
-            datetime.combine(fields.Date.from_string(start_date), time.min)
+            datetime.combine(
+                fields.Date.from_string(start_date),
+                time.min
+            )
         )
+
         end_user = user_tz.localize(
-            datetime.combine(fields.Date.from_string(end_date), time.max)
+            datetime.combine(
+                fields.Date.from_string(end_date),
+                time.max
+            )
         )
 
         start_utc = start_user.astimezone(pytz.utc)
@@ -1334,59 +1801,86 @@ class MobileApiHome(http.Controller):
 
         calendar_data = []
 
-        tasks = request.env['project.task'].sudo().search([
-            ('date_deadline', '>=', start_date),
-            ('date_deadline', '<=', end_date),
-            ('user_ids', 'in', user.id)
-        ])
+        # =====================================================
+        # TASKS
+        # =====================================================
 
-        for task in tasks:
-            calendar_data.append({
-                "type": "task",
-                "id": task.id,
-                "title": task.name,
-                "start": task.date_deadline,
-                "end": task.date_deadline,
-                "color": "#4CAF50",
-                "status": task.stage_id.name if task.stage_id else ""
-            })
+        if not category or category == 'task':
 
-        leaves = request.env['hr.leave'].sudo().search([
-            ('employee_id', '=', employee.id),
-            ('request_date_from', '<=', end_date),
-            ('request_date_to', '>=', start_date),
-            ('state', 'in', ['confirm', 'validate'])
-        ])
+            tasks = request.env['project.task'].sudo().search([
+                ('date_deadline', '>=', start_date),
+                ('date_deadline', '<=', end_date),
+                ('user_ids', 'in', user.id)
+            ])
 
-        for leave in leaves:
-            calendar_data.append({
-                "type": "leave",
-                "id": leave.id,
-                "title": leave.holiday_status_id.name,
-                "start": leave.request_date_from,
-                "end": leave.request_date_to,
-                "color": "#FF9800",
-                "status": leave.state
-            })
+            for task in tasks:
+                calendar_data.append({
+                    "type": "task",
+                    "id": task.id,
+                    "title": task.name,
+                    "start": task.date_deadline,
+                    "end": task.date_deadline,
+                    "color": "#4CAF50",
+                    "status": task.stage_id.name if task.stage_id else ""
+                })
 
-        events = request.env['event.event'].sudo().search([
-            ('date_begin', '<=', end_utc),
-            ('date_end', '>=', start_utc)
-        ])
+        # =====================================================
+        # LEAVES
+        # =====================================================
 
-        for event in events:
-            calendar_data.append({
-                "type": "event",
-                "id": event.id,
-                "title": event.name,
-                "start": fields.Datetime.context_timestamp(user, event.date_begin),
-                "end": fields.Datetime.context_timestamp(user, event.date_end),
-                "color": "#2196F3",
-                "location": event.address_id.name if event.address_id else ""
-            })
+        if not category or category == 'leave':
+
+            leaves = request.env['hr.leave'].sudo().search([
+                ('employee_id', '=', employee.id),
+                ('request_date_from', '<=', end_date),
+                ('request_date_to', '>=', start_date),
+                ('state', 'in', ['confirm', 'validate'])
+            ])
+
+            for leave in leaves:
+                calendar_data.append({
+                    "type": "leave",
+                    "id": leave.id,
+                    "title": leave.holiday_status_id.name,
+                    "start": leave.request_date_from,
+                    "end": leave.request_date_to,
+                    "color": "#FF9800",
+                    "status": leave.state
+                })
+
+        # =====================================================
+        # EVENTS
+        # =====================================================
+
+        if not category or category == 'event':
+
+            events = request.env['event.event'].sudo().search([
+                ('date_begin', '<=', end_utc),
+                ('date_end', '>=', start_utc)
+            ])
+
+            for event in events:
+                calendar_data.append({
+                    "type": "event",
+                    "id": event.id,
+                    "title": event.name,
+                    "start": fields.Datetime.context_timestamp(
+                        user,
+                        event.date_begin
+                    ).strftime('%Y-%m-%d %H:%M:%S') if event.date_begin else '',
+
+                    "end": fields.Datetime.context_timestamp(
+                        user,
+                        event.date_end
+                    ).strftime('%Y-%m-%d %H:%M:%S') if event.date_end else '',
+
+                    "color": "#2196F3",
+                    "location": event.address_id.name if event.address_id else ""
+                })
 
         return {
             "status": 200,
+            "category": category or "all",
             "count": len(calendar_data),
             "calendar": calendar_data
         }
@@ -1402,35 +1896,42 @@ class MobileApiHome(http.Controller):
             [('user_id', '=', user.id)], limit=1
         )
 
+        # ✅ URL only — never send base64 on profile screen
+        # base64 causes heavy payload which pushes UI elements down
+        # and hides content beneath navigation buttons
+        profile_image_url = self.get_image_url('res.users', user.id, 'image_1920')
+
         return {
             "status": 200,
             "uid": user.id,
-            "db": request.session.db,
             "username": user.login,
-            "auth_info": "Session Active",
 
-            # Partner info
+            # Personal info
             "name": user.name or "",
             "street": partner.street or "",
             "city": partner.city or "",
             "zip": partner.zip or "",
-            "country_id": partner.country_id.code if partner.country_id else "",
-            "state_id": partner.state_id.code if partner.state_id else "",
+            "country_code": partner.country_id.code if partner.country_id else "",
+            "country": partner.country_id.name if partner.country_id else "",
+            "state_code": partner.state_id.code if partner.state_id else "",
+            "state": partner.state_id.name if partner.state_id else "",
 
             # Employee info
+            "employee_id": employee.id if employee else None,
             "job_title": employee.job_title if employee else "",
+            "department": employee.department_id.name if employee and employee.department_id else "",
+            "work_email": employee.work_email if employee else "",
             "birthday": employee.birthday.strftime('%d.%m.%Y') if employee and employee.birthday else "",
-            "number": employee.private_phone if employee else "",
-            "manager": employee.parent_id.name if employee and employee.parent_id else "",
+            "phone": employee.private_phone if employee else "",
+            "manager_name": employee.parent_id.name if employee and employee.parent_id else "",
+            "manager_job_title": employee.parent_id.job_title if employee and employee.parent_id else "",
 
             # Timezone
             "timezone": user.tz or "UTC",
 
-            # Profile Image
-            "profile_image_url": self.get_image_url(
-                'res.users', user.id, 'image_1920'
-            ) or "",
-            "image_1920": user.image_1920 or "",
+            # ✅ Image URL only — mobile uses this in Image component directly
+            # Removing base64 fixes the Safe Area / content hidden issue
+            "profile_image_url": profile_image_url,
         }
 
     @http.route('/mobile/profile/update', type='http', auth='user', methods=['POST'], csrf=False)
