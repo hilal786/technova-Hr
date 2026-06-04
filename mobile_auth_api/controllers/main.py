@@ -421,22 +421,20 @@ class MobileApiHome(http.Controller):
             "leave_types": leave_types
         }
         return Response(json.dumps(data), content_type='application/json')
-
+    
     @http.route('/mobile/leaves/create', type='json', auth='user', methods=['POST'], csrf=False)
     def create_leave(self, **kwargs):
 
         user = request.env.user
+        user_ctx = user.with_context(tz=user.tz)
+        tz_name = user.tz or 'UTC'
+        user_tz = pytz.timezone(tz_name)
 
         employee = request.env['hr.employee'].sudo().search(
-            [('user_id', '=', user.id)],
-            limit=1
+            [('user_id', '=', user.id)], limit=1
         )
-
         if not employee:
-            return {
-                "status": 400,
-                "error": "No employee linked to this user"
-            }
+            return {"status": 400, "error": "No employee linked to this user"}
 
         data = request.get_json_data() or {}
 
@@ -446,65 +444,47 @@ class MobileApiHome(http.Controller):
         reason = data.get('reason')
 
         if not all([leave_type_id, date_from, date_to, reason]):
-            return {
-                "status": 400,
-                "error": "Missing required fields"
-            }
+            return {"status": 400, "error": "Missing required fields"}
 
         try:
-
-            leave_type = request.env['hr.leave.type'].sudo().browse(
-                int(leave_type_id)
-            )
-
+            leave_type = request.env['hr.leave.type'].sudo().browse(int(leave_type_id))
             if not leave_type.exists():
-                return {
-                    "status": 400,
-                    "error": "Invalid leave type"
-                }
+                return {"status": 400, "error": "Invalid leave type"}
 
             # =====================================================
             # FULL DAY LEAVE
             # =====================================================
-
             if leave_type.request_unit == 'day':
 
-                request_date_from = fields.Date.to_date(date_from)
-                request_date_to = fields.Date.to_date(date_to)
+                # ✅ Accept both date "2026-06-03" and datetime "2026-06-03 09:00:00"
+                try:
+                    if 'T' in str(date_from) or ' ' in str(date_from):
+                        request_date_from = fields.Datetime.to_datetime(date_from).date()
+                        request_date_to = fields.Datetime.to_datetime(date_to).date()
+                    else:
+                        request_date_from = fields.Date.to_date(date_from)
+                        request_date_to = fields.Date.to_date(date_to)
+                except Exception:
+                    return {"status": 400, "error": "Invalid date format. Use YYYY-MM-DD or YYYY-MM-DD HH:MM:SS"}
 
                 if request_date_to < request_date_from:
-                    return {
-                        "status": 400,
-                        "error": "date_to must be greater than or equal to date_from"
-                    }
+                    return {"status": 400, "error": "date_to must be >= date_from"}
 
-                # =====================================================
                 # CHECK LEAVE BALANCE
-                # =====================================================
-
                 if leave_type.requires_allocation == 'yes':
-
                     remaining_leaves = leave_type.with_context(
                         employee_id=employee.id
                     ).virtual_remaining_leaves
 
-                    requested_days = (
-                        request_date_to - request_date_from
-                    ).days + 1
+                    requested_days = (request_date_to - request_date_from).days + 1
 
                     if remaining_leaves < requested_days:
                         return {
                             "status": 400,
-                            "error": (
-                                f"Insufficient leave balance. "
-                                f"Available: {remaining_leaves} days"
-                            )
+                            "error": f"Insufficient leave balance. Available: {remaining_leaves} days"
                         }
 
-                # =====================================================
-                # CHECK OVERLAPPING LEAVES
-                # =====================================================
-
+                # CHECK OVERLAP
                 existing_leave = request.env['hr.leave'].sudo().search([
                     ('employee_id', '=', employee.id),
                     ('state', '!=', 'cancel'),
@@ -515,93 +495,98 @@ class MobileApiHome(http.Controller):
                 if existing_leave:
                     return {
                         "status": 400,
-                        "error": (
-                            f"Leave already exists from "
-                            f"{existing_leave.request_date_from} to "
-                            f"{existing_leave.request_date_to}"
-                        )
+                        "error": f"Leave already exists from {existing_leave.request_date_from} to {existing_leave.request_date_to}"
                     }
-
-                # =====================================================
-                # CREATE FULL DAY LEAVE
-                # =====================================================
 
                 leave = request.env['hr.leave'].sudo().create({
                     'name': reason,
                     'employee_id': employee.id,
                     'holiday_status_id': int(leave_type_id),
-
                     'request_date_from': request_date_from,
                     'request_date_to': request_date_to,
                 })
 
             # =====================================================
-            # HOURLY LEAVE
+            # HOURLY LEAVE (same-day extra hour requests)
             # =====================================================
-
             else:
+                try:
+                    # ✅ Parse datetime — accept "2026-06-03 09:00:00" or "2026-06-03T09:00:00"
+                    date_from_str = str(date_from).replace('T', ' ')
+                    date_to_str = str(date_to).replace('T', ' ')
 
-                date_from_dt = fields.Datetime.to_datetime(date_from)
-                date_to_dt = fields.Datetime.to_datetime(date_to)
+                    # ✅ Treat incoming datetime as user's local timezone
+                    date_from_local = user_tz.localize(
+                        fields.Datetime.to_datetime(date_from_str)
+                    )
+                    date_to_local = user_tz.localize(
+                        fields.Datetime.to_datetime(date_to_str)
+                    )
 
-                if date_to_dt <= date_from_dt:
+                    # ✅ Convert to UTC for Odoo storage
+                    date_from_utc = date_from_local.astimezone(pytz.utc).replace(tzinfo=None)
+                    date_to_utc = date_to_local.astimezone(pytz.utc).replace(tzinfo=None)
+
+                except Exception:
                     return {
                         "status": 400,
-                        "error": "date_to must be greater than date_from"
+                        "error": "Invalid datetime format. Use YYYY-MM-DD HH:MM:SS"
                     }
 
-                # =====================================================
-                # CHECK OVERLAPPING HOURLY LEAVES
-                # =====================================================
+                if date_to_utc <= date_from_utc:
+                    return {"status": 400, "error": "date_to must be greater than date_from"}
 
+                # Same day check for extra hours
+                if date_from_local.date() != date_to_local.date():
+                    return {
+                        "status": 400,
+                        "error": "Hourly leave must be on the same day"
+                    }
+
+                # CHECK OVERLAP
                 existing_leave = request.env['hr.leave'].sudo().search([
                     ('employee_id', '=', employee.id),
                     ('state', '!=', 'cancel'),
-                    ('date_from', '<=', date_to_dt),
-                    ('date_to', '>=', date_from_dt),
+                    ('date_from', '<=', date_to_utc),
+                    ('date_to', '>=', date_from_utc),
                 ], limit=1)
 
                 if existing_leave:
                     return {
                         "status": 400,
-                        "error": (
-                            f"Leave already exists from "
-                            f"{existing_leave.date_from} to "
-                            f"{existing_leave.date_to}"
-                        )
+                        "error": f"Leave already exists from {existing_leave.date_from} to {existing_leave.date_to}"
                     }
-
-                # =====================================================
-                # CREATE HOURLY LEAVE
-                # =====================================================
 
                 leave = request.env['hr.leave'].sudo().create({
                     'name': reason,
                     'employee_id': employee.id,
                     'holiday_status_id': int(leave_type_id),
-
-                    'date_from': date_from_dt,
-                    'date_to': date_to_dt,
-
-                    'request_date_from': date_from_dt.date(),
-                    'request_date_to': date_to_dt.date(),
-
+                    'date_from': date_from_utc,
+                    'date_to': date_to_utc,
+                    'request_date_from': date_from_local.date(),
+                    'request_date_to': date_to_local.date(),
                     'request_unit_hours': True,
-
-                    'request_hour_from': (
-                        date_from_dt.hour +
-                        (date_from_dt.minute / 60.0)
-                    ),
-
-                    'request_hour_to': (
-                        date_to_dt.hour +
-                        (date_to_dt.minute / 60.0)
-                    ),
+                    'request_hour_from': date_from_local.hour + (date_from_local.minute / 60.0),
+                    'request_hour_to': date_to_local.hour + (date_to_local.minute / 60.0),
                 })
 
             # =====================================================
             # SUCCESS RESPONSE
             # =====================================================
+
+            # ✅ Return times in user's local timezone
+            date_from_display = None
+            date_to_display = None
+
+            if leave.date_from:
+                date_from_display = fields.Datetime.context_timestamp(
+                    user_ctx, leave.date_from
+                ).strftime('%Y-%m-%d %H:%M:%S')
+
+            if leave.date_to:
+                date_to_display = fields.Datetime.context_timestamp(
+                    user_ctx, leave.date_to
+                ).strftime('%Y-%m-%d %H:%M:%S')
 
             return {
                 "status": 200,
@@ -609,23 +594,19 @@ class MobileApiHome(http.Controller):
                 "leave_id": leave.id,
                 "leave_type_id": leave.holiday_status_id.id,
                 "leave_type": leave.holiday_status_id.name,
-                "date_from": str(leave.date_from),
-                "date_to": str(leave.date_to),
+                "leave_unit": leave_type.request_unit,
+                "date_from": date_from_display,
+                "date_to": date_to_display,
                 "number_of_days": leave.number_of_days,
                 "state": leave.state,
             }
 
         except (ValidationError, UserError) as e:
-            return {
-                "status": 400,
-                "error": str(e)
-            }
+            return {"status": 400, "error": str(e)}
 
         except Exception as e:
-            return {
-                "status": 500,
-                "error": str(e)
-            }
+            return {"status": 500, "error": str(e)}
+        
     @http.route('/mobile/employee/profile', type='json', auth='user', csrf=False)
     def employee_profile(self, **kwargs):
         user = request.env.user
@@ -1369,33 +1350,66 @@ class MobileApiHome(http.Controller):
                     "error_code": "NOT_CHECKED_IN",
                     "location": location_context
                 }
+
+            # ✅ Get original first check-in of today BEFORE writing check_out
+            first_work_today = Attendance.search([
+                ('employee_id', '=', employee.id),
+                ('check_in', '>=', today_start),
+                ('check_in', '<=', today_end),
+                ('is_break', '=', False),
+            ], order='check_in asc', limit=1)
+
+            original_check_in_iso = None
+            if first_work_today:
+                original_check_in_iso = fields.Datetime.context_timestamp(
+                    user_ctx, first_work_today.check_in
+                ).isoformat()
+
             open_work.write({
                 'check_out': now,
                 'out_latitude': lat,
                 'out_longitude': lon
             })
-            # Calculate total worked seconds for today
+
+            # ✅ check_out ISO
+            check_out_iso = fields.Datetime.context_timestamp(
+                user_ctx, now
+            ).isoformat()
+
+            # Calculate total worked seconds
             attendances_today = Attendance.search([
                 ('employee_id', '=', employee.id),
                 ('check_in', '>=', today_start),
                 ('check_in', '<=', today_end),
                 ('is_break', '=', False),
             ])
-            total_seconds = sum(
+            total_seconds = int(sum(
                 (a.check_out - a.check_in).total_seconds()
                 for a in attendances_today if a.check_out
-            )
-            hours = int(total_seconds // 3600)
-            minutes = int((total_seconds % 3600) // 60)
+            ))
+
+            # ✅ Fixed message — handles hours, minutes AND seconds
+            hours = total_seconds // 3600
+            minutes = (total_seconds % 3600) // 60
+            seconds = total_seconds % 60
+            if hours > 0:
+                worked_str = f"{hours}h {minutes}m"
+            elif minutes > 0:
+                worked_str = f"{minutes}m {seconds}s"
+            else:
+                worked_str = f"{seconds}s"
+
             return {
                 "success": True,
-                "message": f"Checked out successfully. Total worked: {hours}h {minutes}m.",
+                "message": f"Checked out successfully. Total worked: {worked_str}.",
                 "attendance_id": open_work.id,
-                "total_worked_seconds": int(total_seconds),
+                # ✅ FIXED — both timestamps now returned
+                "check_in_iso": original_check_in_iso,
+                "check_out_iso": check_out_iso,
+                "total_worked_seconds": total_seconds,
                 "current_status": "checked_out",
                 "location": location_context
             }
-
         if action == 'break_start':
             if not open_work:
                 return {
@@ -1749,6 +1763,65 @@ class MobileApiHome(http.Controller):
             }
         }
     
+    @http.route('/mobile/calendar/categories', type='json', auth='user', csrf=False)
+    def mobile_calendar_categories(self, **kwargs):
+        user = request.env.user
+        employee = request.env['hr.employee'].sudo().search(
+            [('user_id', '=', user.id)], limit=1
+        )
+
+        today = fields.Date.today()
+        now = fields.Datetime.now()
+
+        # --- Counts for each category ---
+        task_count = request.env['project.task'].sudo().search_count([
+            ('user_ids', 'in', user.id),
+            ('date_deadline', '>=', today),
+        ])
+
+        leave_count = request.env['hr.leave'].sudo().search_count([
+            ('employee_id', '=', employee.id if employee else 0),
+            ('state', 'in', ['confirm', 'validate']),
+            ('request_date_to', '>=', today),
+        ])
+
+        event_count = request.env['event.event'].sudo().search_count([
+            ('date_end', '>=', now),
+        ])
+
+        total_count = task_count + leave_count + event_count
+
+        categories = [
+            {
+                "key": "all",
+                "label": "All",
+                "color": None,
+                "count": total_count
+            },
+            {
+                "key": "task",
+                "label": "Tasks",
+                "color": "#4CAF50",
+                "count": task_count
+            },
+            {
+                "key": "leave",
+                "label": "Leaves",
+                "color": "#FF9800",
+                "count": leave_count
+            },
+            {
+                "key": "event",
+                "label": "Events",
+                "color": "#2196F3",
+                "count": event_count
+            },
+        ]
+
+        return {
+            "status": 200,
+            "categories": categories
+        }
 
     @http.route('/mobile/calendar', type='json', auth='user', csrf=False)
     def mobile_calendar(self, **kwargs):
