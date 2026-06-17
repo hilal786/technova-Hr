@@ -229,7 +229,7 @@ class MobileApiHome(http.Controller):
             file_size = uploaded_file.tell()
             uploaded_file.seek(0)
 
-            max_size = 10 * 1024 * 1024  # 10 MB
+            max_size = 10 * 1024 * 1024
 
             if file_size > max_size:
                 return request.make_json_response({
@@ -421,8 +421,7 @@ class MobileApiHome(http.Controller):
             "leave_types": leave_types
         }
         return Response(json.dumps(data), content_type='application/json')
-    
-    @http.route('/mobile/leaves/create', type='json', auth='user', methods=['POST'], csrf=False)
+    @http.route('/mobile/leaves/create', type='http', auth='user', methods=['POST'], csrf=False)
     def create_leave(self, **kwargs):
 
         user = request.env.user
@@ -434,29 +433,33 @@ class MobileApiHome(http.Controller):
             [('user_id', '=', user.id)], limit=1
         )
         if not employee:
-            return {"status": 400, "error": "No employee linked to this user"}
+            return request.make_json_response({"status": 400, "error": "No employee linked to this user"})
 
-        data = request.get_json_data() or {}
+        leave_type_id = kwargs.get('leave_type_id')
+        date_from = kwargs.get('date_from')
+        date_to = kwargs.get('date_to')
+        reason = kwargs.get('reason')
 
-        leave_type_id = data.get('leave_type_id')
-        date_from = data.get('date_from')
-        date_to = data.get('date_to')
-        reason = data.get('reason')
+        attachment_file = request.httprequest.files.get('attachment')
 
         if not all([leave_type_id, date_from, date_to, reason]):
-            return {"status": 400, "error": "Missing required fields"}
+            return request.make_json_response({"status": 400, "error": "Missing required fields"})
 
         try:
             leave_type = request.env['hr.leave.type'].sudo().browse(int(leave_type_id))
             if not leave_type.exists():
-                return {"status": 400, "error": "Invalid leave type"}
+                return request.make_json_response({"status": 400, "error": "Invalid leave type"})
 
-            # =====================================================
-            # FULL DAY LEAVE
-            # =====================================================
+            is_sick_leave = 'sick' in (leave_type.name or '').lower()
+
+            if is_sick_leave and not attachment_file:
+                return request.make_json_response({
+                    "status": 400,
+                    "error": "A supporting document (attachment) is required for sick leave requests."
+                })
+
             if leave_type.request_unit == 'day':
 
-                # ✅ Accept both date "2026-06-03" and datetime "2026-06-03 09:00:00"
                 try:
                     if 'T' in str(date_from) or ' ' in str(date_from):
                         request_date_from = fields.Datetime.to_datetime(date_from).date()
@@ -465,12 +468,14 @@ class MobileApiHome(http.Controller):
                         request_date_from = fields.Date.to_date(date_from)
                         request_date_to = fields.Date.to_date(date_to)
                 except Exception:
-                    return {"status": 400, "error": "Invalid date format. Use YYYY-MM-DD or YYYY-MM-DD HH:MM:SS"}
+                    return request.make_json_response({
+                        "status": 400,
+                        "error": "Invalid date format. Use YYYY-MM-DD or YYYY-MM-DD HH:MM:SS"
+                    })
 
                 if request_date_to < request_date_from:
-                    return {"status": 400, "error": "date_to must be >= date_from"}
+                    return request.make_json_response({"status": 400, "error": "date_to must be >= date_from"})
 
-                # CHECK LEAVE BALANCE
                 if leave_type.requires_allocation == 'yes':
                     remaining_leaves = leave_type.with_context(
                         employee_id=employee.id
@@ -479,12 +484,11 @@ class MobileApiHome(http.Controller):
                     requested_days = (request_date_to - request_date_from).days + 1
 
                     if remaining_leaves < requested_days:
-                        return {
+                        return request.make_json_response({
                             "status": 400,
                             "error": f"Insufficient leave balance. Available: {remaining_leaves} days"
-                        }
+                        })
 
-                # CHECK OVERLAP
                 existing_leave = request.env['hr.leave'].sudo().search([
                     ('employee_id', '=', employee.id),
                     ('state', '!=', 'cancel'),
@@ -493,10 +497,10 @@ class MobileApiHome(http.Controller):
                 ], limit=1)
 
                 if existing_leave:
-                    return {
+                    return request.make_json_response({
                         "status": 400,
                         "error": f"Leave already exists from {existing_leave.request_date_from} to {existing_leave.request_date_to}"
-                    }
+                    })
 
                 leave = request.env['hr.leave'].sudo().create({
                     'name': reason,
@@ -506,16 +510,11 @@ class MobileApiHome(http.Controller):
                     'request_date_to': request_date_to,
                 })
 
-            # =====================================================
-            # HOURLY LEAVE (same-day extra hour requests)
-            # =====================================================
             else:
                 try:
-                    # ✅ Parse datetime — accept "2026-06-03 09:00:00" or "2026-06-03T09:00:00"
                     date_from_str = str(date_from).replace('T', ' ')
                     date_to_str = str(date_to).replace('T', ' ')
 
-                    # ✅ Treat incoming datetime as user's local timezone
                     date_from_local = user_tz.localize(
                         fields.Datetime.to_datetime(date_from_str)
                     )
@@ -523,27 +522,24 @@ class MobileApiHome(http.Controller):
                         fields.Datetime.to_datetime(date_to_str)
                     )
 
-                    # ✅ Convert to UTC for Odoo storage
                     date_from_utc = date_from_local.astimezone(pytz.utc).replace(tzinfo=None)
                     date_to_utc = date_to_local.astimezone(pytz.utc).replace(tzinfo=None)
 
                 except Exception:
-                    return {
+                    return request.make_json_response({
                         "status": 400,
                         "error": "Invalid datetime format. Use YYYY-MM-DD HH:MM:SS"
-                    }
+                    })
 
                 if date_to_utc <= date_from_utc:
-                    return {"status": 400, "error": "date_to must be greater than date_from"}
+                    return request.make_json_response({"status": 400, "error": "date_to must be greater than date_from"})
 
-                # Same day check for extra hours
                 if date_from_local.date() != date_to_local.date():
-                    return {
+                    return request.make_json_response({
                         "status": 400,
                         "error": "Hourly leave must be on the same day"
-                    }
+                    })
 
-                # CHECK OVERLAP
                 existing_leave = request.env['hr.leave'].sudo().search([
                     ('employee_id', '=', employee.id),
                     ('state', '!=', 'cancel'),
@@ -552,10 +548,10 @@ class MobileApiHome(http.Controller):
                 ], limit=1)
 
                 if existing_leave:
-                    return {
+                    return request.make_json_response({
                         "status": 400,
                         "error": f"Leave already exists from {existing_leave.date_from} to {existing_leave.date_to}"
-                    }
+                    })
 
                 leave = request.env['hr.leave'].sudo().create({
                     'name': reason,
@@ -570,11 +566,30 @@ class MobileApiHome(http.Controller):
                     'request_hour_to': date_to_local.hour + (date_to_local.minute / 60.0),
                 })
 
-            # =====================================================
-            # SUCCESS RESPONSE
-            # =====================================================
+            attachment_info = None
+            if attachment_file:
+                file_content = attachment_file.read()
+                file_base64 = base64.b64encode(file_content)
 
-            # ✅ Return times in user's local timezone
+                attachment = request.env['ir.attachment'].sudo().create({
+                    'name': attachment_file.filename,
+                    'datas': file_base64,
+                    'res_model': 'hr.leave',
+                    'res_id': leave.id,
+                })
+
+                if 'supported_attachment_ids' in leave._fields:
+                    leave.sudo().write({
+                        'supported_attachment_ids': [(4, attachment.id)]
+                    })
+
+                attachment_info = {
+                    "id": attachment.id,
+                    "name": attachment.name,
+                    "mimetype": attachment.mimetype,
+                    "size": attachment.file_size,
+                }
+
             date_from_display = None
             date_to_display = None
 
@@ -588,24 +603,26 @@ class MobileApiHome(http.Controller):
                     user_ctx, leave.date_to
                 ).strftime('%Y-%m-%d %H:%M:%S')
 
-            return {
+            return request.make_json_response({
                 "status": 200,
                 "message": "Leave request submitted successfully",
                 "leave_id": leave.id,
                 "leave_type_id": leave.holiday_status_id.id,
                 "leave_type": leave.holiday_status_id.name,
                 "leave_unit": leave_type.request_unit,
+                "is_sick_leave": is_sick_leave,
                 "date_from": date_from_display,
                 "date_to": date_to_display,
                 "number_of_days": leave.number_of_days,
                 "state": leave.state,
-            }
+                "attachment": attachment_info,
+            })
 
         except (ValidationError, UserError) as e:
-            return {"status": 400, "error": str(e)}
+            return request.make_json_response({"status": 400, "error": str(e)})
 
         except Exception as e:
-            return {"status": 500, "error": str(e)}
+            return request.make_json_response({"status": 500, "error": str(e)})
         
     @http.route('/mobile/employee/profile', type='json', auth='user', csrf=False)
     def employee_profile(self, **kwargs):
@@ -686,7 +703,6 @@ class MobileApiHome(http.Controller):
                 "hours": round(total_hours, 2)
             })
 
-
         chart_data = sorted(chart_data, key=lambda x: x['date'])
 
         return {
@@ -732,14 +748,12 @@ class MobileApiHome(http.Controller):
         today_start, today_end, today_user = self._get_user_day_range_utc()
         Attendance = request.env['hr.attendance'].sudo()
 
-        # All today's attendance records
         attendances = Attendance.search([
             ('employee_id', '=', employee.id),
             ('check_in', '>=', today_start),
             ('check_in', '<=', today_end)
         ], order='check_in asc')
 
-        # --- Current open sessions ---
         open_work = Attendance.search([
             ('employee_id', '=', employee.id),
             ('check_out', '=', False),
@@ -752,7 +766,6 @@ class MobileApiHome(http.Controller):
             ('is_break', '=', True)
         ], order='check_in desc', limit=1)
 
-        # --- Determine current status ---
         if open_break:
             current_status = 'on_break'
         elif open_work:
@@ -761,21 +774,18 @@ class MobileApiHome(http.Controller):
             any_work_today = any(not a.is_break for a in attendances)
             current_status = 'checked_out' if any_work_today else 'not_checked_in'
 
-        # --- Calculate total worked seconds (completed sessions only) ---
         total_worked_seconds = 0
         for att in attendances:
             if not att.is_break and att.check_out:
                 delta = (att.check_out - att.check_in).total_seconds()
                 total_worked_seconds += max(delta, 0)
 
-        # --- Calculate total break seconds (completed sessions only) ---
         total_break_seconds = 0
         for att in attendances:
             if att.is_break and att.check_out:
                 delta = (att.check_out - att.check_in).total_seconds()
                 total_break_seconds += max(delta, 0)
 
-        # --- ISO timestamps for mobile real-time timers ---
         check_in_iso = None
         break_start_iso = None
 
@@ -789,7 +799,6 @@ class MobileApiHome(http.Controller):
                 user_ctx, open_break.check_in
             ).isoformat()
 
-        # --- Human-readable time logs ---
         clock_in_display = None
         clock_out_display = None
         break_start_display = None
@@ -804,7 +813,6 @@ class MobileApiHome(http.Controller):
                 user_ctx, first_work.check_in
             ).strftime("%I:%M:%S %p")
 
-            # Only show clock_out when truly checked out for the day
             if current_status == 'checked_out':
                 closed_work = [a for a in work_sessions if a.check_out]
                 if closed_work:
@@ -823,7 +831,6 @@ class MobileApiHome(http.Controller):
                     user_ctx, latest_break.check_out
                 ).strftime("%I:%M:%S %p")
 
-        # --- Office location ---
         office_info = {}
         if employee.office_latitude and employee.office_longitude:
             office_info = {
@@ -832,11 +839,9 @@ class MobileApiHome(http.Controller):
                 "allowed_radius_m": employee.allowed_radius_m or 100
             }
 
-        # --- Details card ---
         work_sessions_count = len(work_sessions)
         break_sessions_count = len(break_sessions)
 
-        # Expected hours from employee work schedule
         expected_seconds = 0
         if employee.resource_calendar_id:
             today_weekday = str(today_user.weekday())
@@ -847,7 +852,6 @@ class MobileApiHome(http.Controller):
                 (l.hour_to - l.hour_from) * 3600 for l in day_lines
             )
 
-        # Status label
         status_label_map = {
             'not_checked_in': 'Not Checked In',
             'checked_in': 'Working',
@@ -1272,7 +1276,6 @@ class MobileApiHome(http.Controller):
 
         distance = self._distance_in_meters(lat, lon, office_lat, office_lon)
 
-        # ✅ Always return location context in every response (success or fail)
         location_context = {
             "user_location": {"latitude": lat, "longitude": lon},
             "office_location": {"latitude": office_lat, "longitude": office_lon},
@@ -1351,7 +1354,6 @@ class MobileApiHome(http.Controller):
                     "location": location_context
                 }
 
-            # ✅ Get original first check-in of today BEFORE writing check_out
             first_work_today = Attendance.search([
                 ('employee_id', '=', employee.id),
                 ('check_in', '>=', today_start),
@@ -1371,12 +1373,10 @@ class MobileApiHome(http.Controller):
                 'out_longitude': lon
             })
 
-            # ✅ check_out ISO
             check_out_iso = fields.Datetime.context_timestamp(
                 user_ctx, now
             ).isoformat()
 
-            # Calculate total worked seconds
             attendances_today = Attendance.search([
                 ('employee_id', '=', employee.id),
                 ('check_in', '>=', today_start),
@@ -1388,7 +1388,6 @@ class MobileApiHome(http.Controller):
                 for a in attendances_today if a.check_out
             ))
 
-            # ✅ Fixed message — handles hours, minutes AND seconds
             hours = total_seconds // 3600
             minutes = (total_seconds % 3600) // 60
             seconds = total_seconds % 60
@@ -1403,7 +1402,6 @@ class MobileApiHome(http.Controller):
                 "success": True,
                 "message": f"Checked out successfully. Total worked: {worked_str}.",
                 "attendance_id": open_work.id,
-                # ✅ FIXED — both timestamps now returned
                 "check_in_iso": original_check_in_iso,
                 "check_out_iso": check_out_iso,
                 "total_worked_seconds": total_seconds,
@@ -1773,7 +1771,6 @@ class MobileApiHome(http.Controller):
         today = fields.Date.today()
         now = fields.Datetime.now()
 
-        # --- Counts for each category ---
         task_count = request.env['project.task'].sudo().search_count([
             ('user_ids', 'in', user.id),
             ('date_deadline', '>=', today),
@@ -1831,7 +1828,6 @@ class MobileApiHome(http.Controller):
         start_date = data.get('start_date')
         end_date = data.get('end_date')
 
-        # NEW
         category = data.get('category')
 
         if not start_date or not end_date:
@@ -1874,10 +1870,6 @@ class MobileApiHome(http.Controller):
 
         calendar_data = []
 
-        # =====================================================
-        # TASKS
-        # =====================================================
-
         if not category or category == 'task':
 
             tasks = request.env['project.task'].sudo().search([
@@ -1896,10 +1888,6 @@ class MobileApiHome(http.Controller):
                     "color": "#4CAF50",
                     "status": task.stage_id.name if task.stage_id else ""
                 })
-
-        # =====================================================
-        # LEAVES
-        # =====================================================
 
         if not category or category == 'leave':
 
@@ -1920,10 +1908,6 @@ class MobileApiHome(http.Controller):
                     "color": "#FF9800",
                     "status": leave.state
                 })
-
-        # =====================================================
-        # EVENTS
-        # =====================================================
 
         if not category or category == 'event':
 
@@ -1969,9 +1953,6 @@ class MobileApiHome(http.Controller):
             [('user_id', '=', user.id)], limit=1
         )
 
-        # ✅ URL only — never send base64 on profile screen
-        # base64 causes heavy payload which pushes UI elements down
-        # and hides content beneath navigation buttons
         profile_image_url = self.get_image_url('res.users', user.id, 'image_1920')
 
         return {
@@ -1979,7 +1960,6 @@ class MobileApiHome(http.Controller):
             "uid": user.id,
             "username": user.login,
 
-            # Personal info
             "name": user.name or "",
             "street": partner.street or "",
             "city": partner.city or "",
@@ -1989,7 +1969,6 @@ class MobileApiHome(http.Controller):
             "state_code": partner.state_id.code if partner.state_id else "",
             "state": partner.state_id.name if partner.state_id else "",
 
-            # Employee info
             "employee_id": employee.id if employee else None,
             "job_title": employee.job_title if employee else "",
             "department": employee.department_id.name if employee and employee.department_id else "",
@@ -1999,11 +1978,8 @@ class MobileApiHome(http.Controller):
             "manager_name": employee.parent_id.name if employee and employee.parent_id else "",
             "manager_job_title": employee.parent_id.job_title if employee and employee.parent_id else "",
 
-            # Timezone
             "timezone": user.tz or "UTC",
 
-            # ✅ Image URL only — mobile uses this in Image component directly
-            # Removing base64 fixes the Safe Area / content hidden issue
             "profile_image_url": profile_image_url,
         }
 
@@ -2099,14 +2075,12 @@ class MobileApiHome(http.Controller):
 
         Channel = env['discuss.channel'].sudo()
 
-        #SAFE search: direct chat with exactly these two partners
         channel = Channel.search([
             ('channel_type', '=', 'chat'),
             ('channel_partner_ids', 'in', [current_partner.id]),
             ('channel_partner_ids', 'in', [target_partner.id]),
         ], limit=1)
 
-        #Create if missing
         if not channel:
             channel = Channel.create({
                 'channel_type': 'chat',
@@ -2173,7 +2147,6 @@ class MobileApiHome(http.Controller):
         partner = user.partner_id
         user_ctx = user.with_context(tz=user.tz)
 
-        #Update channel member (THIS fixes unread logic properly)
         member = request.env['discuss.channel.member'].sudo().search([
             ('channel_id', '=', channel.id),
             ('partner_id', '=', partner.id)
@@ -2184,7 +2157,6 @@ class MobileApiHome(http.Controller):
                 'last_interest_dt': fields.Datetime.now()
             })
 
-        #Mark notifications as read
         request.env['mail.notification'].sudo().search([
             ('res_partner_id', '=', partner.id),
             ('mail_message_id.model', '=', 'discuss.channel'),
@@ -2192,7 +2164,6 @@ class MobileApiHome(http.Controller):
             ('is_read', '=', False)
         ]).write({'is_read': True})
 
-        #Push bus update so UI refreshes unread counter
         if member:
             request.env['bus.bus']._sendone(
                 partner,
@@ -2209,7 +2180,6 @@ class MobileApiHome(http.Controller):
                 }
             )
 
-        #Fetch messages
         domain = [
             ('model', '=', 'discuss.channel'),
             ('res_id', '=', channel.id),
@@ -2286,7 +2256,6 @@ class MobileApiHome(http.Controller):
         for m in members:
             channel = m.channel_id
 
-            # Last message
             last_msg = request.env['mail.message'].sudo().search([
                 ('model', '=', 'discuss.channel'),
                 ('res_id', '=', channel.id)
@@ -2382,8 +2351,6 @@ class MobileApiHome(http.Controller):
             "status": 200,
             "message": "Messages marked as read"
         }
-
-
 
     @http.route('/mobile/employees', type='json', auth='user', methods=['POST'], csrf=False)
     def mobile_employees(self, **kwargs):
