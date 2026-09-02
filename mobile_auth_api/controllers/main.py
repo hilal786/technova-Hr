@@ -1688,6 +1688,19 @@ class MobileApiHome(http.Controller):
             offset=offset
         )
 
+        task_ids = tasks.ids
+        timesheet_totals = {}
+        if task_ids:
+            grouped = request.env['account.analytic.line'].sudo().read_group(
+                [('task_id', 'in', task_ids)],
+                ['unit_amount:sum'],
+                ['task_id']
+            )
+            timesheet_totals = {
+                g['task_id'][0]: g['unit_amount']
+                for g in grouped if g['task_id']
+            }
+
         result = []
         for task in tasks:
             result.append({
@@ -1698,6 +1711,8 @@ class MobileApiHome(http.Controller):
                 "status": task.stage_id.name if task.stage_id else "",
                 "deadline": task.date_deadline or False,
                 "priority": task.priority,
+                "description": task.description or "",
+                "timesheet_hours": timesheet_totals.get(task.id, 0.0),
             })
 
         return {
@@ -1760,6 +1775,79 @@ class MobileApiHome(http.Controller):
                 "stage_name": task.stage_id.name
             }
         }
+    
+    @http.route('/mobile/tasks/timesheet', type='json', auth='user', methods=['POST'], csrf=False)
+    def mobile_task_timesheet(self, **kwargs):
+
+        data = request.get_json_data() or {}
+
+        task_id = data.get('task_id')
+        hours = data.get('hours')
+        description = data.get('description', '')
+
+        if not task_id or hours is None:
+            return {
+                "status": 400,
+                "error": "task_id and hours are required"
+            }
+
+        user = request.env.user
+
+        task = request.env['project.task'].sudo().browse(int(task_id))
+
+        if not task.exists():
+            return {
+                "status": 404,
+                "error": "Task not found"
+            }
+
+        if user not in task.user_ids:
+            return {
+                "status": 403,
+                "error": "You are not assigned to this task"
+            }
+
+        try:
+            hours = float(hours)
+
+            if hours <= 0:
+                return {
+                    "status": 400,
+                    "error": "hours must be greater than 0"
+                }
+
+            timesheet = request.env['account.analytic.line'].sudo().create({
+                'name': description or task.name,
+                'task_id': task.id,
+                'user_id': user.id,
+                'unit_amount': hours,
+                'date': fields.Date.today(),
+            })
+
+            return {
+                "status": 200,
+                "message": "Timesheet added successfully",
+                "timesheet": {
+                    "id": timesheet.id,
+                    "task_id": task.id,
+                    "task_name": task.name,
+                    "hours": timesheet.unit_amount,
+                    "description": timesheet.name,
+                    "date": str(timesheet.date),
+                }
+            }
+
+        except (ValidationError, UserError) as e:
+            return {
+                "status": 400,
+                "error": str(e)
+            }
+
+        except Exception as e:
+            return {
+                "status": 500,
+                "error": str(e)
+            }
     
     @http.route('/mobile/calendar/categories', type='json', auth='user', csrf=False)
     def mobile_calendar_categories(self, **kwargs):
@@ -1922,12 +2010,12 @@ class MobileApiHome(http.Controller):
                     "id": event.id,
                     "title": event.name,
                     "start": fields.Datetime.context_timestamp(
-                        user,
+                        user.with_context(tz=user.tz),
                         event.date_begin
                     ).strftime('%Y-%m-%d %H:%M:%S') if event.date_begin else '',
 
                     "end": fields.Datetime.context_timestamp(
-                        user,
+                        user.with_context(tz=user.tz),
                         event.date_end
                     ).strftime('%Y-%m-%d %H:%M:%S') if event.date_end else '',
 
@@ -1989,39 +2077,49 @@ class MobileApiHome(http.Controller):
         user = request.env.user
         partner = user.partner_id
 
-        name = kwargs.get('name')
-        timezone = kwargs.get('timezone')
-        number = kwargs.get('number')
+        try:
+            name = kwargs.get('name')
+            timezone = kwargs.get('timezone')
+            number = kwargs.get('number')
 
-        if name:
-            partner.sudo().write({'name': name})
+            if name:
+                partner.sudo().write({'name': name})
 
-        if timezone:
-            if timezone not in pytz.common_timezones:
-                return request.make_json_response({
-                    "status": 400,
-                    "message": "Invalid timezone"
+            if timezone:
+                if timezone not in pytz.common_timezones:
+                    return request.make_json_response({
+                        "status": 400,
+                        "message": "Invalid timezone"
+                    })
+
+                user.sudo().write({'tz': timezone})
+                request.session['tz'] = timezone
+
+            if number:
+                partner.sudo().write({'phone': number})
+
+            image_file = request.httprequest.files.get("image")
+
+            if image_file:
+                image_base64 = base64.b64encode(image_file.read())
+                partner.sudo().write({
+                    "image_1920": image_base64
                 })
 
-            user.sudo().write({'tz': timezone})
-            request.session['tz'] = timezone
+            return request.make_json_response({
+                    "status": 200,
+                    "message": "Profile updated successfully",
+                    "name": partner.name,
+                    "phone": partner.phone,
+                    "timezone": user.tz,
+                    "profile_image_url": self.get_image_url('res.users', user.id, 'image_1920'),
+                })
 
-        if number:
-            partner.sudo().write({'phone': number})
+        except (ValidationError, UserError) as e:
+            return request.make_json_response({"status": 400, "error": str(e)})
 
-        image_file = request.httprequest.files.get("image")
-
-        if image_file:
-            image_base64 = base64.b64encode(image_file.read())
-            partner.sudo().write({
-                "image_1920": image_base64
-            })
-
-        return request.make_json_response({
-            "status": 200,
-            "message": "Profile updated successfully",
-            "timezone": user.tz
-        })
+        except Exception as e:
+            return request.make_json_response({"status": 500, "error": str(e)})
 
 
     @http.route('/mobile/tasks/status', type='json', auth='user', methods=['POST'], csrf=False)
@@ -2075,20 +2173,7 @@ class MobileApiHome(http.Controller):
 
         Channel = env['discuss.channel'].sudo()
 
-        channel = Channel.search([
-            ('channel_type', '=', 'chat'),
-            ('channel_partner_ids', 'in', [current_partner.id]),
-            ('channel_partner_ids', 'in', [target_partner.id]),
-        ], limit=1)
-
-        if not channel:
-            channel = Channel.create({
-                'channel_type': 'chat',
-                'channel_partner_ids': [
-                    (4, current_partner.id),
-                    (4, target_partner.id),
-                ],
-            })
+        channel = Channel._get_or_create_chat(partners_to=[target_partner.id])
 
         return {
             "status": 200,
