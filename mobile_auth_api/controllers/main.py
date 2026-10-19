@@ -1660,7 +1660,7 @@ class MobileApiHome(http.Controller):
             "file_name": attachment.name
         })
     
-    @http.route('/mobile/tasks', type='json', auth='user', methods=['POST'], csrf=False)
+    @http.route('/mobile/tasks', type='json', auth='user', methods=['GET'], csrf=False)
     def mobile_task_list(self, **kwargs):
 
         user = request.env.user
@@ -2173,7 +2173,22 @@ class MobileApiHome(http.Controller):
 
         Channel = env['discuss.channel'].sudo()
 
-        channel = Channel._get_or_create_chat(partners_to=[target_partner.id])
+        channel = Channel.search([
+            ('channel_type', '=', 'chat'),
+            ('channel_partner_ids', 'in', [current_partner.id]),
+            ('channel_partner_ids', 'in', [target_partner.id]),
+        ], limit=1)
+
+        if not channel:
+            channel = Channel.create({
+                'channel_type': 'chat',
+                'channel_partner_ids': [
+                    (4, current_partner.id),
+                    (4, target_partner.id),
+                ],
+            })
+        
+        # channel = Channel._get_or_create_chat(partners_to=[target_partner.id])
 
         return {
             "status": 200,
